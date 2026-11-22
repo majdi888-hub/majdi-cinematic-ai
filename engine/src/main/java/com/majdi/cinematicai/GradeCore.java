@@ -65,7 +65,7 @@ final class GradeCore {
 
         float dr = m.p99 - Math.max(m.p01, -9f);
         float night = ColorMath.smooth(-4.5f, -6.5f, m.p50);
-        float k = 0.4f + 0.6f * ColorMath.smooth(4f, 10f, dr);
+        float k = p.manualTone ? 1f : 0.4f + 0.6f * ColorMath.smooth(4f, 10f, dr);
         anchor = m.p50;
         float g = p.expo * (-2.6f - m.p50);
         // night scenes keep their darkness: brightening is capped, contrast is not reduced
@@ -75,15 +75,16 @@ final class GradeCore {
         cH = 1f - p.highComp * k;
         // noise-aware processing uses the MEASURED noise at this resolution, not brightness
         noiseSigma = plan.noiseSigmaFor(width, height);
-        nrEff = Math.max(0f, Math.min(1f, p.nr * (noiseSigma - 0.6f) / 2.4f)) * s;
+        nrEff = Math.max(Math.max(0f, Math.min(1f, p.nr * (noiseSigma - 0.6f) / 2.4f)), p.nrUser) * s;
         sharpenAmt = p.sharpen / (1f + 0.25f * Math.max(0f, noiseSigma - 1.5f));
         // white balance (share of the measured correction) and colour temperature, luminance-neutral
         float[] mg = plan.stats != null ? plan.stats.wbGains : new float[]{1f, 1f, 1f};
         float wa = p.wbAmt * (plan.stats != null ? plan.stats.wbConfidence : 0f) * (1f - 0.5f * night);
-        float r0 = (1f + (mg[0] - 1f) * wa) * (1f + 0.08f * p.temp);
-        float b0 = (1f + (mg[2] - 1f) * wa) * (1f - 0.08f * p.temp);
-        float ln = 0.2126f * r0 + 0.7152f + 0.0722f * b0;
-        wbR = r0 / ln; wbG = 1f / ln; wbB = b0 / ln;
+        float r0 = (1f + (mg[0] - 1f) * wa) * (1f + p.tempScale * p.temp) * (1f + 0.06f * p.tint);
+        float b0 = (1f + (mg[2] - 1f) * wa) * (1f - p.tempScale * p.temp) * (1f + 0.06f * p.tint);
+        float g0 = 1f - 0.12f * p.tint;
+        float ln = 0.2126f * r0 + 0.7152f * g0 + 0.0722f * b0;
+        wbR = r0 / ln; wbG = g0 / ln; wbB = b0 / ln;
 
         // tone-mapping knees: only true highlights are compressed and only true shadows lifted;
         // the mid-tones between them keep their level and their local contrast
@@ -95,7 +96,7 @@ final class GradeCore {
         toeEff = p.toe * (1f - 0.8f * night);
         whiteC = ColorMath.exp2(pivot + (Math.max(0f, gainEV) - pivot) * p.contrast + 0.1f);
         shoulderS0 = p.shoulder;
-        if (whiteC > shoulderS0 + 1e-3f) {
+        if (shoulderS0 < 0.999f && whiteC > shoulderS0 + 1e-3f) {
             float slope = (whiteC - shoulderS0) / (1f - shoulderS0);
             shoulderOn = slope > 1.0001f;
             shoulderA = shoulderOn ? 1f / (slope - 1f) : 0f;
@@ -135,6 +136,8 @@ final class GradeCore {
     private float toneY(float x) {
         float y = shoulder(x);
         if (toeEff > 0f) y = y * y * (1f + toeEff) / (y + toeEff);
+        if (p.whites != 0f) y *= 1f + 0.5f * p.whites * ColorMath.smooth(0.12f, 1.0f, y);
+        if (p.blacks != 0f) y = Math.max(0f, y + 0.025f * p.blacks * (1f - ColorMath.smooth(0f, 0.18f, y)));
         return y;
     }
 
@@ -216,7 +219,7 @@ final class GradeCore {
      */
     private void stage1(float r8, float g8, float b8, int x, int y, float[] out) {
         float R0 = ColorMath.decode(r8), G0 = ColorMath.decode(g8), B0 = ColorMath.decode(b8);
-        // white balance + colour temperature (base processing), part of the graded result
+        // white balance + colour temperature + tint (base processing), part of the graded result
         float R = R0 * wbR, G = G0 * wbG, B = B0 * wbB;
 
         float ux = (x + 0.5f) / w, vy = (y + 0.5f) / h, ud, vd;
@@ -231,6 +234,20 @@ final class GradeCore {
             default: ud = ux; vd = vy; break;
         }
         lastUd = ud; lastVd = vd;
+        // dehaze (dark-channel prior on the low-resolution grid) / add haze
+        if (p.dehaze != 0f && m.airlight > 0f) {
+            float A = m.airlight;
+            if (p.dehaze > 0f) {
+                float t = Math.max(0.25f, 1f - 0.85f * m.sample(m.hazeDark, ud, vd) / A);
+                float k = p.dehaze;
+                R += (Math.max(0f, (R - A) / t + A) - R) * k;
+                G += (Math.max(0f, (G - A) / t + A) - G) * k;
+                B += (Math.max(0f, (B - A) / t + A) - B) * k;
+            } else {
+                float hz = -0.4f * p.dehaze;
+                R += (A - R) * hz; G += (A - G) * hz; B += (A - B) * hz;
+            }
+        }
 
         float fm = 0f;
         for (int k = 0; k < fcx.length; k++) {
@@ -334,7 +351,7 @@ final class GradeCore {
             G2 = bl + (1f - bl) * G2;
             B2 = bl + (1f - bl) * B2;
         }
-        if (p.vig > 0f) {
+        if (p.vig != 0f) {   // >0 darkens the corners, <0 lightens them
             float dx = (ud - 0.5f) * dispAspect, dy = vd - 0.5f;
             float rr = (float) Math.sqrt(dx * dx + dy * dy) / (0.5f * (float) Math.sqrt(dispAspect * dispAspect + 1f));
             float v = 1f - p.vig * ColorMath.smooth(0.45f, 1.25f, rr) * (1f - fm);

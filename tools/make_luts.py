@@ -27,7 +27,12 @@ def smooth(e0, e1, x):
     t = np.clip((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t)
 
 def look(rgb, p):
-    lab = lin_to_oklab(srgb_to_lin(rgb))
+    lin0 = srgb_to_lin(rgb)
+    if p.get('mono'):
+        # black & white with a yellow-orange filter response (skies deepen, skin stays luminous)
+        y = lin0 @ np.array(p['mono'])
+        lin0 = np.repeat(y[..., None], 3, axis=-1)
+    lab = lin_to_oklab(lin0)
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     C = np.hypot(a, b); h = np.degrees(np.arctan2(b, a)) % 360
     neutral = smooth(0.02, 0.06, C)                # leave greys neutral before split toning
@@ -85,6 +90,10 @@ LOOKS = {
       sat=1.0, hl_desat=0.30, shadow_tint=(-0.006, -0.008), high_tint=(0.006, 0.012),
       contrast=1.03, black=0.012, white=0.99),
   # Dramatic print: restrained palette, cool shadows, silver-like highlights
+  # Dramatic Noir: monochrome silver print with a cool-shadow / warm-highlight split tone
+  'noir': dict(title='Majdi Dramatic Noir', mono=[0.42, 0.48, 0.10],
+      pulls=[], chroma=[], sat=1.0, hl_desat=0.0, shadow_tint=(-0.004, -0.008), high_tint=(0.004, 0.008),
+      contrast=1.14, black=0.008, white=0.99),
   'dramatic_print': dict(title='Majdi Dramatic Print',
       pulls=[(215, 70, 0.20), (58, 40, 0.10)],
       chroma=[(58, 45, 0.95), (140, 50, 0.80)],

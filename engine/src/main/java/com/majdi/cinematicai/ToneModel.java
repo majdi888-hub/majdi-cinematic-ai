@@ -20,6 +20,9 @@ final class ToneModel {
     /** Mid-scale edge-aware layer (about 1% of the frame): drives local contrast / clarity. */
     final int gw2, gh2;
     final float[] midA, midB;
+    /** smoothed dark channel (min RGB, linear) and airlight estimate, for Dehaze */
+    float[] hazeDark;
+    float airlight;
     final float p01, p50, p99;
     final float[][] faces;   // {left, top, right, bottom} normalized, display orientation
 
@@ -68,6 +71,7 @@ final class ToneModel {
         int gw = Math.max(4, Math.round(w * s));
         int gh = Math.max(4, Math.round(h * s));
         double[] sum = new double[gw * gh];
+        double[] dsum = new double[gw * gh];
         int[] cnt = new int[gw * gh];
 
         for (int y = 0; y < h; y++) {
@@ -80,6 +84,7 @@ final class ToneModel {
                 hist[Math.max(0, Math.min(bins - 1, bi))]++;
                 int gx = Math.min(gw - 1, (int) ((x + 0.5f) * gw / w));
                 sum[gy * gw + gx] += Y;
+                dsum[gy * gw + gx] += Math.min(lin[(c >> 16) & 255], Math.min(lin[(c >> 8) & 255], lin[c & 255]));
                 cnt[gy * gw + gx]++;
                 int gx2 = Math.min(gw2 - 1, (int) ((x + 0.5f) * gw2 / w));
                 int gy2 = Math.min(gh2 - 1, (int) ((y + 0.5f) * gh2 / h));
@@ -127,7 +132,16 @@ final class ToneModel {
         int r2 = Math.max(2, Math.round(Math.max(gw2, gh2) / 96f));
         float[][] ab2 = Guided.guidedCoeffs(I2m, I2m, gw2, gh2, r2, 0.06f);
 
-        return new ToneModel(gw, gh, mA, mB, sI, gw2, gh2, ab2[0], ab2[1], p01, p50, p99, faces == null ? new float[0][] : faces);
+        float[] dk = new float[n];
+        for (int i = 0; i < n; i++) dk[i] = cnt[i] > 0 ? (float) (dsum[i] / cnt[i]) : 0f;
+        dk = boxMean(dk, gw, gh, Math.max(1, r / 3));
+        float[] srt = dk.clone();
+        java.util.Arrays.sort(srt);
+        float air = Math.max(0.3f, srt[(int) (srt.length * 0.995f)]);
+        ToneModel tmOut = new ToneModel(gw, gh, mA, mB, sI, gw2, gh2, ab2[0], ab2[1], p01, p50, p99, faces == null ? new float[0][] : faces);
+        tmOut.hazeDark = dk;
+        tmOut.airlight = air;
+        return tmOut;
     }
 
     private static float percentile(int[] hist, long total, double q, float lo, float hi) {

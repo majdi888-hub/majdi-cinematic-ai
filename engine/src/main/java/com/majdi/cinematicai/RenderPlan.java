@@ -68,6 +68,9 @@ final class RenderPlan {
                 st = Style.of("dramatic");
                 if (night) { st.depthDodge = 0.15f; st.nightKeep = 0.8f; st.shadowLift = 0.46f; }
                 break;
+            case "custom":
+                st = opt.custom;
+                break;
             default:
                 st = Style.of(opt.style);
         }
@@ -109,7 +112,8 @@ final class RenderPlan {
         }
 
         Lut3D lut = null;
-        if (opt.style.equals("cinematic") && opt.userLut != null) lut = opt.userLut;
+        if (opt.lutOverride != null) lut = opt.lutOverride;
+        else if (opt.style.equals("cinematic") && opt.userLut != null) lut = opt.userLut;
         else if (st.lut != null && st.lutAmt > 0f && luts != null) lut = luts.load(st.lut);
 
         RenderPlan plan = new RenderPlan(st, opt.strength, tone, stats, maps, lut, reason, iso);

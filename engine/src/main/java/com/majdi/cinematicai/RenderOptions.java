@@ -16,12 +16,14 @@ final class RenderOptions {
     float focusRange = 0f;         // -1 narrow .. +1 wide: depth range that stays sharp
     float objectGrow = 0f;         // -1 shrink .. +1 grow the selected object's boundary
     Lut3D userLut;                 // replaces the Cinematic preset's LUT when set
+    Style custom;                  // used when style == "custom" (Adjust panel, filter library)
+    Lut3D lutOverride;             // imported LUT used as this layer's film stock
 
     RenderOptions copy() {
         RenderOptions o = new RenderOptions();
         o.style = style; o.preset = preset; o.strength = strength;
         o.cinematic = cinematic; o.dramatic = dramatic; o.dslr = dslr; o.depthBlur = depthBlur;
-        o.focal = focal; o.aperture = aperture; o.focusMode = focusMode; o.focusRange = focusRange; o.objectGrow = objectGrow; o.focus = focus == null ? null : focus.clone(); o.userLut = userLut;
+        o.focal = focal; o.aperture = aperture; o.focusMode = focusMode; o.focusRange = focusRange; o.objectGrow = objectGrow; o.focus = focus == null ? null : focus.clone(); o.userLut = userLut; o.custom = custom; o.lutOverride = lutOverride;
         return o;
     }
 }

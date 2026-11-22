@@ -27,6 +27,13 @@ final class Style {
     int focal = 50;        // 35 / 50 / 85 (visual simulation only)
     float aperture = 2.8f; // f/1.8 .. f/5.6 (visual simulation only)
     float blurAmt = 1f;
+    // manual (Adjust) controls; neutral defaults leave the image untouched
+    boolean manualTone;    // tone knees not scaled by scene dynamic range
+    float whites, blacks;  // -1..1 end-point adjustments
+    float tint;            // -1 green .. +1 magenta
+    float dehaze;          // -1 add haze .. +1 remove haze
+    float nrUser;          // 0..1 explicit noise reduction, independent of measured noise
+    float tempScale = 0.08f;
 
     static Style of(String key) {
         return of(key, "");
@@ -63,6 +70,29 @@ final class Style {
                 break;
             case "fusion":
                 fusion(p, 0.8f, 0.6f, 0.7f, 0.5f, false);
+                break;
+            case "portrait":
+                // Portrait Pro: flattering natural colour, refined skin tones, gentle subject light,
+                // background separation by depth only when the subject is reliable
+                p.wbAmt = 0.4f; p.temp = 0.06f; p.expo = 0.18f;
+                p.shadowLift = 0.30f; p.highComp = 0.36f; p.detail = 1.10f; p.midBoost = 1.12f;
+                p.contrast = 1.06f; p.shoulder = 0.74f; p.blackLift = 0.004f;
+                p.shadowGain = new float[]{0.98f, 1.00f, 1.02f};
+                p.highGain = new float[]{1.03f, 1.00f, 0.97f};
+                p.sat = 0.97f; p.vib = 0.10f; p.vig = 0.12f; p.sharpen = 0.35f; p.nr = 1.0f;
+                p.depthDodge = 0.18f;
+                p.lut = "natural_cinematic"; p.lutAmt = 0.6f;
+                p.skinRefine = 0.5f; p.grain = 0.004f;
+                p.bokeh = true; p.focal = 85; p.aperture = 2.8f; p.blurAmt = 0.6f;
+                break;
+            case "noir":
+                // Dramatic Noir: monochrome print, strong local contrast, deep but detailed blacks
+                p.wbAmt = 0f; p.expo = 0.10f;
+                p.shadowLift = 0.32f; p.highComp = 0.55f; p.detail = 1.50f; p.midBoost = 2.4f;
+                p.contrast = 1.32f; p.shoulder = 0.64f; p.toe = 0.004f;
+                p.sat = 1f; p.vig = 0.26f; p.sharpen = 0.45f; p.nr = 1.0f;
+                p.lut = "noir"; p.lutAmt = 1.0f;
+                p.grain = 0.02f;
                 break;
             case "natural":
             default:
