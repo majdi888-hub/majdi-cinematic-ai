@@ -11,13 +11,17 @@ final class RenderOptions {
     int focal = 50;
     float aperture = 2.8f;
     float[] focus;                 // tapped focus point {u, v} in display coordinates, or null
+    // controllable blur tool
+    String focusMode = "object";   // "object": keep the whole tapped object sharp; "point": focal plane at the tap
+    float focusRange = 0f;         // -1 narrow .. +1 wide: depth range that stays sharp
+    float objectGrow = 0f;         // -1 shrink .. +1 grow the selected object's boundary
     Lut3D userLut;                 // replaces the Cinematic preset's LUT when set
 
     RenderOptions copy() {
         RenderOptions o = new RenderOptions();
         o.style = style; o.preset = preset; o.strength = strength;
         o.cinematic = cinematic; o.dramatic = dramatic; o.dslr = dslr; o.depthBlur = depthBlur;
-        o.focal = focal; o.aperture = aperture; o.focus = focus == null ? null : focus.clone(); o.userLut = userLut;
+        o.focal = focal; o.aperture = aperture; o.focusMode = focusMode; o.focusRange = focusRange; o.objectGrow = objectGrow; o.focus = focus == null ? null : focus.clone(); o.userLut = userLut;
         return o;
     }
 }

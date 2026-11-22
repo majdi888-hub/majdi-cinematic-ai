@@ -30,6 +30,7 @@ final class RenderPlan {
     Bokeh bokeh;
     float[] sA, sB;
     float[] halo;
+    float[] focusMask;          // working-res map of what stays sharp (for the on-screen overlay)
 
     private RenderPlan(Style st, float strength, ToneModel tone, SceneStats stats, SceneMaps maps, Lut3D lut, String reason, String iso) {
         this.style = st; this.strength = strength; this.tone = tone; this.stats = stats; this.maps = maps;
@@ -76,9 +77,20 @@ final class RenderPlan {
         String iso = "off";
         boolean useSubject = false;
         float focus = 0f;
+        float[] objectMask = null;
+        float[] lumW = new float[w * h];
+        for (int i = 0; i < lumW.length; i++) {
+            int c = px[i];
+            lumW[i] = (0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255)) / 255f;
+        }
         if (st.bokeh) {
             if (maps == null || !maps.hasDepth()) {
                 iso = "off-no-depth";
+            } else if (opt.focus != null && opt.focusMode.equals("object")) {
+                // whole tapped object stays sharp; focal plane = its median depth
+                objectMask = ObjectSelect.select(maps, lumW, opt.focus[0], opt.focus[1], opt.objectGrow);
+                focus = ObjectSelect.medianDepth(maps.depth, objectMask);
+                iso = "on";
             } else if (opt.focus != null) {
                 focus = maps.depthAt(opt.focus[0], opt.focus[1]);
                 useSubject = maps.hasSubject && maps.subjectAt(opt.focus[0], opt.focus[1]) > 0.5f;
@@ -111,22 +123,20 @@ final class RenderPlan {
         }
         int n = w * h;
         if (lens) {
-            float[] lum = new float[n];
-            for (int i = 0; i < n; i++) {
-                int c = px[i];
-                lum[i] = (0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255)) / 255f;
-            }
+            float[] lum = lumW;
             // lens simulation (visual approximation): blur grows with focal length and opening,
             // depth of field widens with smaller apertures and shorter lenses
             float lensK = st.focal <= 35 ? 0.55f : (st.focal >= 85 ? 1.7f : 1.0f);
             float apK = 1.8f / Math.max(1.8f, st.aperture);
             float radius = Math.max(w, h) * 0.020f * lensK * apK * st.blurAmt * opt.strength;
             float dof = 0.025f * (st.aperture / 1.8f) * (float) Math.sqrt(50.0 / st.focal);
-            float[] subj = useSubject ? maps.subject : new float[n];
+            dof *= (float) Math.pow(8.0, Math.max(-1f, Math.min(1f, opt.focusRange)));   // user: narrow .. wide
+            float[] subj = objectMask != null ? objectMask : (useSubject ? maps.subject : new float[n]);
             plan.bokeh = Bokeh.render(plan.gR, plan.gG, plan.gB, maps.depth, subj, w, h, focus, radius, dof);
             float[][] ab = Guided.guidedCoeffs(lum, plan.bokeh.sharp, w, h, 2, 1e-4f);
             plan.sA = ab[0];
             plan.sB = ab[1];
+            plan.focusMask = plan.bokeh.sharp;
         }
         if (st.halation > 0f) {
             float[] r = plan.bokeh != null ? plan.bokeh.rr : plan.gR;
