@@ -50,8 +50,8 @@ public class MainActivity extends Activity {
     private static final int REQ_PICK = 11;
     private static final int PREVIEW_MAX = 2048;
 
-    private static final String[] STYLE_KEYS = {"cinematic", "dramatic", "dslr"};
-    private static final String[] STYLE_NAMES = {"سينمائي\nCinematic", "درامي\nDramatic", "احترافي\nDSLR"};
+    private static final String[] STYLE_KEYS = {"natural", "cinematic", "dramatic", "dslr"};
+    private static final String[] STYLE_NAMES = {"طبيعي\nNatural", "سينمائي\nCinematic", "درامي\nDramatic", "احترافي\nDSLR"};
 
     private static final int BG = Color.rgb(14, 15, 19);
     private static final int CARD = Color.rgb(30, 32, 40);
@@ -59,14 +59,15 @@ public class MainActivity extends Activity {
 
     private ImageView imageView;
     private TextView status, strengthLabel;
-    private final Button[] styleButtons = new Button[3];
+    private final Button[] styleButtons = new Button[STYLE_KEYS.length];
     private Button openBtn, saveBtn, shareBtn;
 
     private Uri sourceUri;
     private Bitmap previewOriginal, previewResult;
     private List<RectF> faces = new ArrayList<>();
-    private String style = "cinematic";
-    private int strength = 80;
+    private ToneModel model;
+    private String style = "natural";
+    private int strength = 60;   // moderate by default; can be raised manually
     private Uri lastSaved;
     private int renderToken = 0;
 
@@ -166,7 +167,7 @@ public class MainActivity extends Activity {
 
         LinearLayout styles = new LinearLayout(this);
         styles.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < STYLE_KEYS.length; i++) {
             final int idx = i;
             Button b = makeButton(STYLE_NAMES[i]);
             b.setOnClickListener(v -> selectStyle(STYLE_KEYS[idx]));
@@ -219,7 +220,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateStyleButtons() {
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < STYLE_KEYS.length; i++) {
             boolean sel = STYLE_KEYS[i].equals(style);
             GradientDrawable g = rounded(sel ? Color.rgb(28, 110, 125) : CARD);
             if (sel) g.setStroke(dp(2), ACCENT);
@@ -297,10 +298,12 @@ public class MainActivity extends Activity {
             try {
                 Bitmap bmp = decode(uri, PREVIEW_MAX);
                 List<RectF> f = detectFaces(bmp);
-                Bitmap res = ImageEngine.process(bmp, st, s, f);
+                ToneModel tm = ImageEngine.analyze(bmp, f);
+                Bitmap res = ImageEngine.process(bmp, st, s, tm);
                 ui.post(() -> {
                     previewOriginal = bmp;
                     faces = f;
+                    model = tm;
                     if (token == renderToken) {
                         previewResult = res;
                         imageView.setImageBitmap(res);
@@ -324,12 +327,13 @@ public class MainActivity extends Activity {
         if (base == null) return;
         final String st = style;
         final float s = strength / 100f;
-        final List<RectF> f = new ArrayList<>(faces);
+        final ToneModel tm = model;
+        if (tm == null) return;
         final int token = ++renderToken;
         worker.execute(() -> {
             if (token != renderToken) return;
             try {
-                Bitmap res = ImageEngine.process(base, st, s, f);
+                Bitmap res = ImageEngine.process(base, st, s, tm);
                 ui.post(() -> {
                     if (token == renderToken) {
                         previewResult = res;
@@ -352,13 +356,14 @@ public class MainActivity extends Activity {
         }
         final String st = style;
         final float s = strength / 100f;
-        final List<RectF> f = new ArrayList<>(faces);
+        final ToneModel tm = model;
+        if (tm == null) return;
         final Uri src = sourceUri;
         setBusy(true);
         status.setText("جارٍ الحفظ بالدقة الأصلية…");
         worker.execute(() -> {
             try {
-                ExportResult res = exportFullRes(src, st, s, f);
+                ExportResult res = exportFullRes(src, st, s, tm);
                 ui.post(() -> {
                     lastSaved = res.uri;
                     setBusy(false);
@@ -388,9 +393,8 @@ public class MainActivity extends Activity {
      * Pixels stay in their stored orientation and the EXIF orientation tag is written to the output.
      */
     @SuppressWarnings("deprecation")
-    private ExportResult exportFullRes(Uri src, String st, float s, List<RectF> facesDisplay) throws IOException {
+    private ExportResult exportFullRes(Uri src, String st, float s, ToneModel tm) throws IOException {
         int orient = readOrientation(src);
-        float[][] rawFaces = mapFacesToRaw(facesDisplay, orient);
 
         BitmapRegionDecoder dec = null;
         try (InputStream in = getContentResolver().openInputStream(src)) {
@@ -432,7 +436,8 @@ public class MainActivity extends Activity {
             if (raw == null) throw new IOException("open failed");
             OutputStream os = new BufferedOutputStream(raw, 1 << 20);
             JpegStreamWriter jw = new JpegStreamWriter(os, W, H, 95, orient);
-            GradeCore core = new GradeCore(st, s, rawFaces, W, H);
+            // same analysis as the preview; stored pixels are mapped to the displayed orientation
+            GradeCore core = new GradeCore(st, s, tm, W, H, orient);
             int strip = ImageEngine.STRIP;
             int[] in = new int[W * (strip + 2)];
             int[] o = new int[W * strip];
@@ -494,40 +499,6 @@ public class MainActivity extends Activity {
             if (b == null) throw new IOException("decode failed");
             return b;
         }
-    }
-
-    /** Maps face rectangles from the displayed (orientation-corrected) image back to stored pixels. */
-    private static float[][] mapFacesToRaw(List<RectF> faces, int orient) {
-        float[][] outArr = new float[faces.size()][];
-        for (int i = 0; i < outArr.length; i++) {
-            RectF r = faces.get(i);
-            float[] a = toRaw(r.left, r.top, orient);
-            float[] b = toRaw(r.right, r.bottom, orient);
-            outArr[i] = new float[]{Math.min(a[0], b[0]), Math.min(a[1], b[1]),
-                    Math.max(a[0], b[0]), Math.max(a[1], b[1])};
-        }
-        return outArr;
-    }
-
-    private static float[] toRaw(float xd, float yd, int orient) {
-        switch (orient) {
-            case 2: return new float[]{1f - xd, yd};
-            case 3: return new float[]{1f - xd, 1f - yd};
-            case 4: return new float[]{xd, 1f - yd};
-            case 5: return new float[]{yd, xd};
-            case 6: return new float[]{yd, 1f - xd};
-            case 7: return new float[]{1f - yd, 1f - xd};
-            case 8: return new float[]{1f - yd, xd};
-            default: return new float[]{xd, yd};
-        }
-    }
-
-    private void share(Uri uri) {
-        Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("image/jpeg");
-        send.putExtra(Intent.EXTRA_STREAM, uri);
-        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(Intent.createChooser(send, "مشاركة الصورة"));
     }
 
     private Bitmap decode(Uri uri, int maxSide) throws IOException {

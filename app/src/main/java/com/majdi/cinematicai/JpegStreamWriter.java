@@ -4,8 +4,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 
 /**
- * Baseline JPEG encoder (YCbCr 4:2:0) that receives the image row by row, so a photo of any
- * resolution can be written while holding only 16 rows in memory. Pure Java.
+ * Baseline JPEG encoder (YCbCr 4:4:4, full color resolution) that receives the image row by
+ * row, so a photo of any resolution can be written while holding only 8 rows in memory.
+ * Pixels are converted to YCbCr in float precision. Pure Java.
  */
 final class JpegStreamWriter {
 
@@ -69,7 +70,7 @@ final class JpegStreamWriter {
     private final int[] dcYc = new int[12], dcYs = new int[12], dcCc = new int[12], dcCs = new int[12];
     private final int[] acYc = new int[256], acYs = new int[256], acCc = new int[256], acCs = new int[256];
 
-    private final float[] Yp, Cbp, Crp;   // 16 rows of Y, 8 rows of subsampled Cb/Cr
+    private final float[] Yp, Cbp, Crp;   // 8 rows of each component
     private final int[] lastRow;
     private int bufRows = 0, rowsReceived = 0;
     private int bitBuf = 0, bitCnt = 0;
@@ -87,10 +88,10 @@ final class JpegStreamWriter {
         this.out = out;
         this.w = width;
         this.h = height;
-        this.padW = (width + 15) & ~15;
-        Yp = new float[padW * 16];
-        Cbp = new float[(padW / 2) * 8];
-        Crp = new float[(padW / 2) * 8];
+        this.padW = (width + 7) & ~7;
+        Yp = new float[padW * 8];
+        Cbp = new float[padW * 8];
+        Crp = new float[padW * 8];
         lastRow = new int[width];
 
         quality = Math.max(1, Math.min(100, quality));
@@ -170,7 +171,7 @@ final class JpegStreamWriter {
         w16(0xFFC0);
         w16(17);
         b(8); w16(h); w16(w); b(3);
-        b(1); b(0x22); b(0);
+        b(1); b(0x11); b(0);
         b(2); b(0x11); b(1);
         b(3); b(0x11); b(1);
 
@@ -210,47 +211,29 @@ final class JpegStreamWriter {
     }
 
     private void addRow(int[] px, int off) throws IOException {
-        int yRow = bufRows * padW;
-        int cRow = (bufRows >> 1) * (padW / 2);
-        boolean firstOfPair = (bufRows & 1) == 0;
+        int row = bufRows * padW;
         for (int x = 0; x < padW; x++) {
             int c = px[off + Math.min(x, w - 1)];
             int R = (c >> 16) & 255, G = (c >> 8) & 255, B = c & 255;
-            Yp[yRow + x] = 0.299f * R + 0.587f * G + 0.114f * B - 128f;
-            float cb = -0.168736f * R - 0.331264f * G + 0.5f * B;
-            float cr = 0.5f * R - 0.418688f * G - 0.081312f * B;
-            int ci = cRow + (x >> 1);
-            if (firstOfPair && (x & 1) == 0) {
-                Cbp[ci] = cb * 0.25f;
-                Crp[ci] = cr * 0.25f;
-            } else {
-                Cbp[ci] += cb * 0.25f;
-                Crp[ci] += cr * 0.25f;
-            }
+            Yp[row + x] = 0.299f * R + 0.587f * G + 0.114f * B - 128f;
+            Cbp[row + x] = -0.168736f * R - 0.331264f * G + 0.5f * B;
+            Crp[row + x] = 0.5f * R - 0.418688f * G - 0.081312f * B;
         }
         if (px != lastRow) System.arraycopy(px, off, lastRow, 0, w);
         bufRows++;
-        if (bufRows == 16) {
+        if (bufRows == 8) {
             encodeMcuRow();
             bufRows = 0;
         }
     }
 
     private void encodeMcuRow() throws IOException {
-        int cw = padW / 2;
-        for (int mx = 0; mx < padW; mx += 16) {
-            for (int by = 0; by < 16; by += 8) {
-                for (int bx = 0; bx < 16; bx += 8) {
-                    for (int r = 0; r < 8; r++) {
-                        System.arraycopy(Yp, (by + r) * padW + mx + bx, blk, r * 8, 8);
-                    }
-                    predY = encodeBlock(blk, fdY, predY, dcYc, dcYs, acYc, acYs);
-                }
-            }
-            int c0 = mx >> 1;
-            for (int r = 0; r < 8; r++) System.arraycopy(Cbp, r * cw + c0, blk, r * 8, 8);
+        for (int mx = 0; mx < padW; mx += 8) {
+            for (int r = 0; r < 8; r++) System.arraycopy(Yp, r * padW + mx, blk, r * 8, 8);
+            predY = encodeBlock(blk, fdY, predY, dcYc, dcYs, acYc, acYs);
+            for (int r = 0; r < 8; r++) System.arraycopy(Cbp, r * padW + mx, blk, r * 8, 8);
             predCb = encodeBlock(blk, fdC, predCb, dcCc, dcCs, acCc, acCs);
-            for (int r = 0; r < 8; r++) System.arraycopy(Crp, r * cw + c0, blk, r * 8, 8);
+            for (int r = 0; r < 8; r++) System.arraycopy(Crp, r * padW + mx, blk, r * 8, 8);
             predCr = encodeBlock(blk, fdC, predCr, dcCc, dcCs, acCc, acCs);
         }
     }
