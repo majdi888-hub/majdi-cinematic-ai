@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'dev/**' ]
   workflow_dispatch:
 
 permissions:
@@ -60,27 +60,27 @@ jobs:
         run: |
           set -e
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          cp app/build/outputs/apk/release/app-release.apk MajdiCinematicAI.apk
+          cp app/build/outputs/apk/release/app-release.apk Majdi-Cinematic-AI.apk
           {
             echo "## Signature check (apksigner $("$BT/apksigner" --version))"
             echo '```'
-            "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 MajdiCinematicAI.apk
+            "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 Majdi-Cinematic-AI.apk
             echo '```'
             echo "## Alignment check (zipalign)"
             echo '```'
-            "$BT/zipalign" -c 4 MajdiCinematicAI.apk && echo "zipalign: OK"
+            "$BT/zipalign" -c 4 Majdi-Cinematic-AI.apk && echo "zipalign: OK"
             echo '```'
             echo "## Package info (aapt2)"
             echo '```'
-            "$BT/aapt2" dump badging MajdiCinematicAI.apk | grep -E "^(package|sdkVersion|minSdkVersion|targetSdkVersion|application-label|native-code)" || true
+            "$BT/aapt2" dump badging Majdi-Cinematic-AI.apk | grep -E "^(package|sdkVersion|minSdkVersion|targetSdkVersion|application-label|native-code)" || true
             echo '```'
             echo "## Bundled models"
             echo '```'
-            unzip -l MajdiCinematicAI.apk | grep -E "\.onnx|libonnxruntime" || true
+            unzip -l Majdi-Cinematic-AI.apk | grep -E "\.onnx|libonnxruntime" || true
             echo '```'
-            echo "APK size: $(du -h MajdiCinematicAI.apk | cut -f1)"
+            echo "APK size: $(du -h Majdi-Cinematic-AI.apk | cut -f1)"
             echo ""
-            echo "SHA-256 of file: $(sha256sum MajdiCinematicAI.apk | cut -d' ' -f1)"
+            echo "SHA-256 of file: $(sha256sum Majdi-Cinematic-AI.apk | cut -d' ' -f1)"
             echo ""
             echo "## Engine test report"
             echo '```'
@@ -94,18 +94,19 @@ jobs:
         with:
           name: MajdiCinematicAI
           path: |
-            MajdiCinematicAI.apk
+            Majdi-Cinematic-AI.apk
             verification.md
             engine-test-results.zip
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.${{ github.run_number }}
-          name: Majdi Cinematic AI v2.0.${{ github.run_number }}
+          tag_name: v3.0.${{ github.run_number }}
+          name: Majdi Cinematic AI v3.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
           body_path: verification.md
           files: |
-            MajdiCinematicAI.apk
+            Majdi-Cinematic-AI.apk
             verification.md
             engine-test-results.zip
           make_latest: true

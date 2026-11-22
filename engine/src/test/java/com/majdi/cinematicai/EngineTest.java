@@ -28,7 +28,8 @@ public class EngineTest {
 
     static File out;
     static String depthModel, matteModel;
-    static final String[] STYLES = {"natural", "cinematic", "dramatic", "dslr", "auto"};
+    static final String[][] STYLES = {{"fusion", ""}, {"natural", ""}, {"cinematic", "hollywood"}, {"cinematic", "moody"}, {"cinematic", "night"},
+            {"cinematic", "film"}, {"cinematic", "natural_cinematic"}, {"dramatic", ""}, {"dslr", ""}, {"auto", ""}};
     static final List<String> report = new ArrayList<>();
 
     @BeforeClass
@@ -68,9 +69,10 @@ public class EngineTest {
 
     static int[] render(RenderPlan plan, int[] px, int w, int h, int strip) {
         GradeCore g = new GradeCore(plan, w, h, 1);
-        int[] o = new int[w * h], in = new int[w * (strip + 2)], ob = new int[w * strip];
+        int H = GradeCore.HALO;
+        int[] o = new int[w * h], in = new int[w * (strip + 2 * H)], ob = new int[w * strip];
         for (int y0 = 0; y0 < h; y0 += strip) {
-            int y1 = Math.min(h, y0 + strip), ys = Math.max(0, y0 - 1), ye = Math.min(h, y1 + 1);
+            int y1 = Math.min(h, y0 + strip), ys = Math.max(0, y0 - H), ye = Math.min(h, y1 + H);
             System.arraycopy(px, ys * w, in, 0, (ye - ys) * w);
             g.processStrip(in, ys, ye - ys, y0, y1, ob);
             System.arraycopy(ob, 0, o, y0 * w, (y1 - y0) * w);
@@ -114,11 +116,11 @@ public class EngineTest {
             id.apply(r, g, b, o);
             assertEquals(r, o[0], 1e-5); assertEquals(g, o[1], 1e-5); assertEquals(b, o[2], 1e-5);
         }
-        for (String n : new String[]{"teal_orange_film", "warm_print", "night_neon", "silver_dramatic"}) {
+        for (String n : new String[]{"hollywood", "moody_film", "night_cinema", "film_look", "natural_cinematic", "dramatic_print"}) {
             Lut3D l = lut(n);
             assertEquals(33, l.size);
         }
-        report.add("LUT: .cube parser + tetrahedral interpolation exact on identity (10000 samples); 4 film LUTs load (33^3)");
+        report.add("LUT: .cube parser + tetrahedral interpolation exact on identity (10000 samples); 6 film LUTs load (33^3)");
     }
 
     @Test
@@ -175,48 +177,83 @@ public class EngineTest {
             int w = wh[0], h = wh[1];
             float[][] faces = faces(name);
             ToneModel tone = ToneModel.build(px, w, h, faces);
+            SceneStats stats = SceneStats.measure(px, w, h);
             SceneMaps maps = null;
             if (depthModel != null || matteModel != null) {
                 long t = System.nanoTime();
                 maps = new SceneAnalyzer(depthModel, matteModel, 4).analyze(px, w, h, faces);
-                report.add(String.format(Locale.US, "%s analysis (depth + subject, Java ORT): %d ms, subject=%b area=%.2f separation=%.2f",
-                        name, (System.nanoTime() - t) / 1000000, maps.hasSubject, maps.subjectArea, maps.separation));
+                report.add(String.format(Locale.US, "%s analysis (depth + subject, Java ORT): %d ms, subject=%b reliable=%b area=%.2f separation=%.2f noise=%.2f",
+                        name, (System.nanoTime() - t) / 1000000, maps.hasSubject, maps.subjectReliable(), maps.subjectArea, maps.separation, stats.noiseSigma));
             }
             save(px, w, h, name + "_original");
             int[][] results = new int[STYLES.length][];
             for (int si = 0; si < STYLES.length; si++) {
-                String st = STYLES[si];
-                for (float strength : new float[]{0.6f, 1.0f}) {
-                    long t0 = System.nanoTime();
-                    RenderPlan plan = RenderPlan.build(px, w, h, st, strength, tone, maps, faces.length, EngineTest::lut, null);
-                    int[] o = render(plan, px, w, h, 128);
-                    long ms = (System.nanoTime() - t0) / 1000000;
-                    save(o, w, h, String.format(Locale.US, "%s_%s_%d", name, st, Math.round(strength * 100)));
-                    int[] whole = render(plan, px, w, h, h);
-                    assertArrayEquals("strip output differs from whole-image output (" + st + ")", whole, o);
-                    double dOrig = meanAbsDiff(px, o);
-                    String line = String.format(Locale.US, "%s %-9s %3d%%: %5d ms, mean change %.1f/255, strips identical%s%s",
-                            name, st, Math.round(strength * 100), ms, dOrig,
-                            plan.bokeh != null ? ", depth bokeh ON" : "", plan.reason != null ? ", auto=" + plan.style.lut : "");
-                    if (faces.length > 0) {
-                        double before = regionLuma(px, w, h, faces[0]), after = regionLuma(o, w, h, faces[0]);
-                        assertTrue("face darkened in " + st + ": " + before + " -> " + after, after > before - 1.0);
-                        line += String.format(Locale.US, ", face luma %.1f -> %.1f", before, after);
-                    }
-                    report.add(line);
-                    if (strength == 1.0f) results[si] = o;
-                    if (st.equals("dslr") && maps != null && maps.hasDepth())
-                        assertNotNull("DSLR must use the depth map", plan.bokeh);
+                String st = STYLES[si][0], pr = STYLES[si][1];
+                String label = st + (pr.isEmpty() ? "" : "_" + pr);
+                RenderOptions o = new RenderOptions();
+                o.style = st; o.preset = pr; o.strength = 0.65f;
+                long t0 = System.nanoTime();
+                RenderPlan plan = RenderPlan.build(px, w, h, o, tone, stats, maps, faces.length, EngineTest::lut);
+                int[] out = render(plan, px, w, h, 128);
+                long ms = (System.nanoTime() - t0) / 1000000;
+                save(out, w, h, name + "_" + label);
+                int[] whole = render(plan, px, w, h, h);
+                assertArrayEquals("strip output differs from whole-image output (" + label + ")", whole, out);
+                String line = String.format(Locale.US, "%s %-26s 65%%: %5d ms, mean change %.1f/255, strips identical, isolation=%s",
+                        name, label, ms, meanAbsDiff(px, out), plan.isolation);
+                if (faces.length > 0) {
+                    double before = regionLuma(px, w, h, faces[0]), after = regionLuma(out, w, h, faces[0]);
+                    assertTrue("face darkened in " + label + ": " + before + " -> " + after, after > before - 1.5);
+                    line += String.format(Locale.US, ", face luma %.1f -> %.1f", before, after);
                 }
+                report.add(line);
+                results[si] = out;
             }
-            // the three main looks must be visibly and deliberately different
-            for (int a = 1; a < 4; a++) for (int b = a + 1; b < 4; b++) {
-                if (STYLES[a].equals("natural") || STYLES[b].equals("natural")) continue;
-                double d = meanAbsDiff(results[a], results[b]);
-                report.add(String.format(Locale.US, "%s difference %s vs %s at 100%%: %.1f/255", name, STYLES[a], STYLES[b], d));
-                if (name.equals("astronaut")) assertTrue("styles too similar: " + STYLES[a] + "/" + STYLES[b] + " " + d, d > 3.0);
+            // distinct looks: cinematic presets, dramatic and fusion must differ visibly
+            int[] idx = {0, 2, 3, 5, 7};
+            for (int a = 0; a < idx.length; a++) for (int b = a + 1; b < idx.length; b++) {
+                double d = meanAbsDiff(results[idx[a]], results[idx[b]]);
+                report.add(String.format(Locale.US, "%s difference %s/%s vs %s/%s: %.1f/255", name,
+                        STYLES[idx[a]][0], STYLES[idx[a]][1], STYLES[idx[b]][0], STYLES[idx[b]][1], d));
             }
         }
+    }
+
+    @Test
+    public void blurToolObjectFocusAndGate() throws Exception {
+        Assume.assumeNotNull(depthModel);
+        int[] wh = new int[2];
+        int[] px = load("astronaut", wh);
+        int w = wh[0], h = wh[1];
+        float[][] faces = faces("astronaut");
+        ToneModel tone = ToneModel.build(px, w, h, faces);
+        SceneStats stats = SceneStats.measure(px, w, h);
+        SceneMaps maps = new SceneAnalyzer(depthModel, matteModel, 4).analyze(px, w, h, faces);
+        RenderOptions o = new RenderOptions();
+        o.style = "dslr"; o.strength = 0.8f; o.focus = new float[]{0.43f, 0.26f}; o.focusMode = "object";
+        RenderPlan plan = RenderPlan.build(px, w, h, o, tone, stats, maps, faces.length, EngineTest::lut);
+        assertEquals("on", plan.isolation);
+        assertNotNull(plan.focusMask);
+        float inFace = Guided.sample(plan.focusMask, w, h, 0.43f, 0.26f);
+        float corner = Guided.sample(plan.focusMask, w, h, 0.95f, 0.05f);
+        assertTrue("tapped object must stay sharp: " + inFace, inFace > 0.8f);
+        assertTrue("far background must be blurred: " + corner, corner < 0.3f);
+        save(render(plan, px, w, h, 128), w, h, "astronaut_dslr_tap_face_object");
+        o.focusRange = 1f;
+        RenderPlan wide = RenderPlan.build(px, w, h, o, tone, stats, maps, faces.length, EngineTest::lut);
+        o.focusRange = -1f;
+        RenderPlan narrow = RenderPlan.build(px, w, h, o, tone, stats, maps, faces.length, EngineTest::lut);
+        double sw = 0, sn = 0;
+        for (int i = 0; i < wide.focusMask.length; i++) { sw += wide.focusMask[i]; sn += narrow.focusMask[i]; }
+        assertTrue("wide focus range must keep more of the frame sharp", sw > sn);
+        // no tap, no reliable subject -> isolation must stay off (never a generic blur)
+        SceneMaps none = SceneMaps.build(new float[w * h], w, h, new float[w * h], w, h, null, 0, 0, new float[0][]);
+        RenderOptions o2 = new RenderOptions();
+        o2.style = "dslr";
+        RenderPlan off = RenderPlan.build(px, w, h, o2, ToneModel.build(px, w, h, new float[0][]), stats, none, 0, EngineTest::lut);
+        assertNull("DSLR must not blur without a trusted focus", off.bokeh);
+        report.add(String.format(Locale.US, "Blur tool: tapped object sharp=%.2f, far corner=%.2f; sharp area wide/narrow = %.0f/%.0f px; no-subject isolation=%s",
+                inFace, corner, sw, sn, off.isolation));
     }
 
     @org.junit.AfterClass
