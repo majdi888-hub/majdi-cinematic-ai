@@ -501,6 +501,14 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void share(Uri uri) {
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("image/jpeg");
+        send.putExtra(Intent.EXTRA_STREAM, uri);
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivity(Intent.createChooser(send, "مشاركة الصورة"));
+    }
+
     private Bitmap decode(Uri uri, int maxSide) throws IOException {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
