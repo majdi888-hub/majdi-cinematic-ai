@@ -35,13 +35,19 @@ final class GradeCore {
     private final int w, h, orient;
     private final float dispAspect, grainCell;
 
-    private final float anchor, gainEV, cS, cH, coreT0, coreTShadow, sharpenAmt;
+    /** rows of context needed above/below each strip: 2 for noise reduction + 1 for sharpening */
+    static final int HALO = 3;
+
+    private final float anchor, gainEV, cS, cH, sharpenAmt, noiseSigma, nrEff;
+    private final float wbR, wbG, wbB;
+    private final float hKnee, sKnee;
     private final float whiteC, shoulderA, shoulderS0, pivot, toeEff;
     private final boolean shoulderOn;
     private final float[] fcx, fcy, frx, fry;
 
     private float[] fr = new float[0], fg = new float[0], fb = new float[0], fl = new float[0];
     private float[] fmask = new float[0], sharpW = new float[0];
+    private float[] dnR = new float[0], dnG = new float[0], dnB = new float[0];
     private final float[] lutOut = new float[3];
 
     GradeCore(RenderPlan plan, int width, int height, int orientation) {
@@ -62,15 +68,30 @@ final class GradeCore {
         float k = 0.4f + 0.6f * ColorMath.smooth(4f, 10f, dr);
         anchor = m.p50;
         float g = p.expo * (-2.6f - m.p50);
-        float gMax = 0.6f - 0.25f * night;
-        gainEV = Math.max(-0.35f, Math.min(gMax, g));
-        cS = 1f - p.shadowLift * k * (1f - 0.5f * night);
+        // night scenes keep their darkness: brightening is capped, contrast is not reduced
+        float gMax = 0.6f - 0.5f * night * p.nightKeep;
+        gainEV = Math.max(-0.35f, Math.min(gMax, g)) + p.expoComp;
+        cS = 1f - p.shadowLift * k;
         cH = 1f - p.highComp * k;
-        coreT0 = 0.10f * (1f + 1.5f * night);
-        coreTShadow = 0.25f * (1f + night);
-        sharpenAmt = p.sharpen * (1f - 0.5f * night);
+        // noise-aware processing uses the MEASURED noise at this resolution, not brightness
+        noiseSigma = plan.noiseSigmaFor(width, height);
+        nrEff = Math.max(0f, Math.min(1f, p.nr * (noiseSigma - 0.6f) / 2.4f)) * s;
+        sharpenAmt = p.sharpen / (1f + 0.25f * Math.max(0f, noiseSigma - 1.5f));
+        // white balance (share of the measured correction) and colour temperature, luminance-neutral
+        float[] mg = plan.stats != null ? plan.stats.wbGains : new float[]{1f, 1f, 1f};
+        float wa = p.wbAmt * (plan.stats != null ? plan.stats.wbConfidence : 0f) * (1f - 0.5f * night);
+        float r0 = (1f + (mg[0] - 1f) * wa) * (1f + 0.08f * p.temp);
+        float b0 = (1f + (mg[2] - 1f) * wa) * (1f - 0.08f * p.temp);
+        float ln = 0.2126f * r0 + 0.7152f + 0.0722f * b0;
+        wbR = r0 / ln; wbG = 1f / ln; wbB = b0 / ln;
 
-        pivot = Math.max(-7f, Math.min(LOG2_MID, anchor + gainEV));
+        // tone-mapping knees: only true highlights are compressed and only true shadows lifted;
+        // the mid-tones between them keep their level and their local contrast
+        float p99 = m.p99;
+        hKnee = Math.max(-2.4f, Math.min(-1.0f, p99 - 1.5f));
+        sKnee = Math.min(hKnee - 2.0f, Math.max(-7.5f, Math.min(-4.0f, anchor - 0.5f)));
+        // contrast pivot follows the lit content (between the median and the highlights)
+        pivot = Math.max(-6.5f, Math.min(LOG2_MID, 0.5f * (anchor + gainEV) + 0.5f * (p99 - 2.0f)));
         toeEff = p.toe * (1f - 0.8f * night);
         whiteC = ColorMath.exp2(pivot + (Math.max(0f, gainEV) - pivot) * p.contrast + 0.1f);
         shoulderS0 = p.shoulder;
@@ -101,39 +122,102 @@ final class GradeCore {
         return shoulderS0 + (1f - shoulderS0) * gT;
     }
 
+    /** Adaptive tone mapping of the illumination layer (log2): smooth knees, identity in between. */
+    private float toneBase(float b) {
+        return b + (cH - 1f) * softplus(b - hKnee, 0.6f) - (cS - 1f) * softplus(sKnee - b, 0.6f);
+    }
+
+    private static float softplus(float x, float k) {
+        if (x > 8f * k) return x;
+        return k * (float) Math.log1p(Math.exp(x / k));
+    }
+
     private float toneY(float x) {
         float y = shoulder(x);
         if (toeEff > 0f) y = y * y * (1f + toeEff) / (y + toeEff);
         return y;
     }
 
-    /** Stages 1-4 for a whole (working-resolution, display-oriented) image: linear planes. */
+    /** Stages 0-4 for a whole (working-resolution, display-oriented) image: linear planes. */
     float[][] gradeLinear(int[] px) {
         int n = w * h;
         float[][] outp = {new float[n], new float[n], new float[n]};
         float[] tmp = new float[4];
+        float[] r = new float[n], g = new float[n], b = new float[n];
+        denoise(px, 0, h, 0, h, r, g, b);
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 int i = y * w + x;
-                stage1(px[i], x, y, tmp, null);
+                stage1(r[i], g[i], b[i], x, y, tmp);
                 outp[0][i] = tmp[0]; outp[1][i] = tmp[1]; outp[2][i] = tmp[2];
             }
         }
         return outp;
     }
 
+    /**
+     * Stage 0: edge-preserving noise reduction (5x5 bilateral, range kernel on luma, strength set
+     * by the measured noise). Chroma noise is removed fully, luma noise partially so texture stays.
+     * Writes float sRGB code values for rows [r0, r1) of the strip (strip-relative indices).
+     * @param rows number of rows present in px (strip-relative 0..rows-1, absolute ys..)
+     */
+    private void denoise(int[] px, int r0, int r1, int ysAbs, int rows, float[] or, float[] og, float[] ob) {
+        int ysRel0 = 0;
+        if (nrEff <= 0.001f) {
+            for (int r = r0; r < r1; r++) for (int x = 0; x < w; x++) {
+                int i = r * w + x, c = px[i];
+                or[i] = (c >> 16) & 255; og[i] = (c >> 8) & 255; ob[i] = c & 255;
+            }
+            return;
+        }
+        float sr = 2.2f * Math.max(1f, noiseSigma);
+        float inv2 = 1f / (2f * sr * sr);
+        float[] sp = new float[25];
+        for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++)
+            sp[(dy + 2) * 5 + dx + 2] = (float) Math.exp(-(dx * dx + dy * dy) / (2.0 * 1.3 * 1.3));
+        float lumaAmt = 0.65f * nrEff, chromaAmt = nrEff;
+        for (int r = r0; r < r1; r++) {
+            int yAbs = ysAbs + r;
+            for (int x = 0; x < w; x++) {
+                int i = r * w + x, c = px[i];
+                float R = (c >> 16) & 255, G = (c >> 8) & 255, B = c & 255;
+                float Y = 0.299f * R + 0.587f * G + 0.114f * B;
+                float sw = 0f, sR = 0f, sG = 0f, sB = 0f;
+                for (int dy = -2; dy <= 2; dy++) {
+                    int yy = Math.max(0, Math.min(h - 1, yAbs + dy)) - ysAbs;
+                    yy = Math.max(ysRel0, Math.min(rows - 1, yy));
+                    for (int dx = -2; dx <= 2; dx++) {
+                        int xx = Math.max(0, Math.min(w - 1, x + dx));
+                        int cc = px[yy * w + xx];
+                        float r2 = (cc >> 16) & 255, g2 = (cc >> 8) & 255, b2 = cc & 255;
+                        float d = 0.299f * r2 + 0.587f * g2 + 0.114f * b2 - Y;
+                        float wt = sp[(dy + 2) * 5 + dx + 2] * (float) Math.exp(-d * d * inv2);
+                        sw += wt; sR += r2 * wt; sG += g2 * wt; sB += b2 * wt;
+                    }
+                }
+                float fR = sR / sw, fG = sG / sw, fB = sB / sw;
+                float fY = 0.299f * fR + 0.587f * fG + 0.114f * fB;
+                // recombine: denoised chroma, partially denoised luma
+                float nY = Y + (fY - Y) * lumaAmt;
+                float cR = R - Y + ((fR - fY) - (R - Y)) * chromaAmt;
+                float cG = G - Y + ((fG - fY) - (G - Y)) * chromaAmt;
+                float cB = B - Y + ((fB - fY) - (B - Y)) * chromaAmt;
+                or[i] = nY + cR; og[i] = nY + cG; ob[i] = nY + cB;
+            }
+        }
+    }
+
     /** Scratch values passed out of stage1. */
     private float lastFm, lastSkin, lastUd, lastVd, lastProtect;
 
     /**
-     * Stages 1-4. Writes linear R,G,B (strength-blended) into out[0..2].
-     * @param orig if non-null receives the original linear RGB
+     * Stages 1-4 on (denoised) sRGB code values. Writes linear R,G,B (strength-blended against
+     * the original) into out[0..2] and the original display luma into out[3].
      */
-    private void stage1(int c, int x, int y, float[] out, float[] orig) {
-        final float[] lin = ColorMath.SRGB_TO_LINEAR;
-        int r8 = (c >> 16) & 255, g8 = (c >> 8) & 255, b8 = c & 255;
-        float R = lin[r8], G = lin[g8], B = lin[b8];
-        if (orig != null) { orig[0] = R; orig[1] = G; orig[2] = B; }
+    private void stage1(float r8, float g8, float b8, int x, int y, float[] out) {
+        float R0 = ColorMath.decode(r8), G0 = ColorMath.decode(g8), B0 = ColorMath.decode(b8);
+        // white balance + colour temperature (base processing), part of the graded result
+        float R = R0 * wbR, G = G0 * wbG, B = B0 * wbB;
 
         float ux = (x + 0.5f) / w, vy = (y + 0.5f) / h, ud, vd;
         switch (orient) {
@@ -177,13 +261,13 @@ final class GradeCore {
         float base = m.sample(m.meanA, ud, vd) * I + m.sample(m.meanB, ud, vd);
         float baseMid = Guided.sample(m.midA, m.gw2, m.gh2, ud, vd) * I + Guided.sample(m.midB, m.gw2, m.gh2, ud, vd);
         float mid = baseMid - base, fine = I - baseMid;
-        float db = base - anchor;
-        float sig = 1f / (1f + (float) Math.exp(-db * 1.5f));
-        float base2 = anchor + db * (cS + (cH - cS) * sig);
-        float shadowness = ColorMath.smooth(-4f, -8f, base);
-        float t = coreT0 + coreTShadow * shadowness;
+        float base2 = toneBase(base);
+        // coring threshold from the measured noise: the same code-value noise is a larger log
+        // swing in dark pixels, so the threshold follows pixel brightness
+        float t = Math.max(0.015f, 1.8f * Math.max(0.4f, noiseSigma * (1f - 0.6f * nrEff)) / (Math.max(Y8, 6f) * 0.693f));
         float coreF = fine * fine / (fine * fine + t * t);
-        float tm = 0.06f + 0.5f * t;
+        // mid-scale structure is far above sensor noise: only a small threshold, scaled by noise
+        float tm = 0.012f + 0.25f * (t - 0.015f);
         float coreM = mid * mid / (mid * mid + tm * tm);
         // faces (detected, or skin on the subject when the detector misses a face): texture untouched
         float nf = 1f - Math.max(fm, 0.8f * skin);
@@ -207,9 +291,7 @@ final class GradeCore {
         float ratio = Yf / Z;
         if (fm > 0f) {
             float sb = m.sample(m.smoothI, ud, vd);
-            float sdb = sb - anchor;
-            float ssig = 1f / (1f + (float) Math.exp(-sdb * 1.5f));
-            float sB = anchor + sdb * (cS + (cH - cS) * ssig) + gainEV + depthEV;
+            float sB = toneBase(sb) + gainEV + depthEV;
             float yb = toneY(ColorMath.exp2(pivot + (sB - pivot) * p.contrast));
             float rb = yb / ColorMath.exp2(sb);
             if (rb < 1f) rb = 1f;
@@ -247,9 +329,10 @@ final class GradeCore {
 
         // ---- 4. black level, vignette, strength
         if (p.blackLift > 0f) {
-            R2 = p.blackLift + (1f - p.blackLift) * R2;
-            G2 = p.blackLift + (1f - p.blackLift) * G2;
-            B2 = p.blackLift + (1f - p.blackLift) * B2;
+            float bl = p.blackLift * (1f - 0.85f * fm);      // film fade kept off faces (texture)
+            R2 = bl + (1f - bl) * R2;
+            G2 = bl + (1f - bl) * G2;
+            B2 = bl + (1f - bl) * B2;
         }
         if (p.vig > 0f) {
             float dx = (ud - 0.5f) * dispAspect, dy = vd - 0.5f;
@@ -257,16 +340,17 @@ final class GradeCore {
             float v = 1f - p.vig * ColorMath.smooth(0.45f, 1.25f, rr) * (1f - fm);
             R2 *= v; G2 *= v; B2 *= v;
         }
-        out[0] = R + (R2 - R) * s;
-        out[1] = G + (G2 - G) * s;
-        out[2] = B + (B2 - B) * s;
+        out[0] = R0 + (R2 - R0) * s;
+        out[1] = G0 + (G2 - G0) * s;
+        out[2] = B0 + (B2 - B0) * s;
         out[3] = Y8 / 255f;
     }
 
     /**
      * Renders output rows [y0, y1).
-     * @param in  ARGB pixels of rows [ys, ys + rows), full width; one row above y0 (if y0 > 0)
-     *            and one below y1 (if y1 < height) are required for sharpening
+     * @param in  ARGB pixels of rows [ys, ys + rows), full width, with ys = max(0, y0 - HALO) and
+     *            ys + rows = min(height, y1 + HALO): the overlap gives noise reduction and
+     *            sharpening the neighbours they need, so strips match whole-image processing
      * @param out receives rows [y0, y1), full width, from index 0
      */
     void processStrip(int[] in, int ys, int rows, int y0, int y1, int[] out) {
@@ -274,16 +358,18 @@ final class GradeCore {
         if (fr.length < cap) {
             fr = new float[cap]; fg = new float[cap]; fb = new float[cap]; fl = new float[cap];
             fmask = new float[cap]; sharpW = new float[cap];
+            dnR = new float[cap]; dnG = new float[cap]; dnB = new float[cap];
         }
         float[] px = new float[4];
         Bokeh bk = plan.bokeh;
         boolean lens = bk != null;
-        for (int r = 0; r < rows; r++) {
+        int rStart = Math.max(0, y0 - 1 - ys), rEnd = Math.min(rows, y1 + 1 - ys);
+        denoise(in, rStart, rEnd, ys, rows, dnR, dnG, dnB);
+        for (int r = rStart; r < rEnd; r++) {
             int y = ys + r;
             for (int x = 0; x < w; x++) {
                 int idx = r * w + x;
-                int c = in[idx];
-                stage1(c, x, y, px, null);
+                stage1(dnR[idx], dnG[idx], dnB[idx], x, y, px);
                 float R2 = px[0], G2 = px[1], B2 = px[2];
                 float ud = lastUd, vd = lastVd, fm = lastFm, skin = lastSkin, protect = lastProtect;
                 float sharpness = 1f;
@@ -337,6 +423,18 @@ final class GradeCore {
                     eb = yy + 1.772f * cbv;
                 }
 
+                // ---- final balancing: soft knee on chroma so stacked stages never oversaturate
+                if (p.chromaLimit < 1f) {
+                    float yy = 0.299f * er + 0.587f * eg + 0.114f * eb;
+                    float dr = er - yy, dg = eg - yy, dbb = eb - yy;
+                    float cmag = (float) Math.sqrt(dr * dr + dg * dg + dbb * dbb);
+                    float knee = 95f * p.chromaLimit;
+                    if (cmag > knee) {
+                        float lim = knee + (cmag - knee) / (1f + (cmag - knee) / 60f);
+                        float kk2 = lim / cmag;
+                        er = yy + dr * kk2; eg = yy + dg * kk2; eb = yy + dbb * kk2;
+                    }
+                }
                 fr[idx] = er; fg[idx] = eg; fb[idx] = eb;
                 fl[idx] = 0.299f * er + 0.587f * eg + 0.114f * eb;
                 fmask[idx] = fm;

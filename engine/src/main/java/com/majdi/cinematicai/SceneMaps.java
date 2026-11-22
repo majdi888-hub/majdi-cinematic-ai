@@ -22,6 +22,30 @@ final class SceneMaps {
 
     boolean hasDepth() { return depthValid; }
 
+    /**
+     * A subject is trusted for automatic lens isolation only if it is a sizeable region that
+     * stands clearly in front of its background. A small bright object (a lamp, a fan) is not.
+     */
+    boolean subjectReliable() {
+        return hasSubject && subjectArea >= 0.04f && subjectArea <= 0.65f && separation >= 0.10f;
+    }
+
+    /** Depth of the focal plane at a tapped point: median inverse depth in a small window. */
+    float depthAt(float u, float v) {
+        int cx = Math.round(u * (w - 1)), cy = Math.round(v * (h - 1));
+        int r = Math.max(2, Math.max(w, h) / 120);
+        float[] vals = new float[(2 * r + 1) * (2 * r + 1)];
+        int c = 0;
+        for (int y = Math.max(0, cy - r); y <= Math.min(h - 1, cy + r); y++)
+            for (int x = Math.max(0, cx - r); x <= Math.min(w - 1, cx + r); x++) vals[c++] = depth[y * w + x];
+        Arrays.sort(vals, 0, c);
+        return vals[c / 2];
+    }
+
+    float subjectAt(float u, float v) {
+        return Guided.sample(subject, w, h, u, v);
+    }
+
     private SceneMaps(int w, int h, float[] d, float[] s, boolean has, float area, float focus, float sep, float spread, boolean dv) {
         this.w = w; this.h = h; depth = d; subject = s; hasSubject = has; subjectArea = area;
         this.focus = focus; separation = sep; depthSpread = spread; depthValid = dv;

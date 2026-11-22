@@ -54,26 +54,42 @@ def look(rgb, p):
     return lin_to_srgb(lin)
 
 LOOKS = {
-  'teal_orange_film': dict(title='Majdi Teal & Orange Film',
-      pulls=[(215, 80, 0.45), (58, 50, 0.30), (140, 60, 0.55), (100, 40, 0.25)],
-      chroma=[(58, 45, 1.12), (215, 70, 1.18), (140, 55, 0.62), (330, 50, 0.70), (280, 40, 0.80)],
-      sat=0.95, hl_desat=0.45, shadow_tint=(-0.030, -0.034), high_tint=(0.016, 0.030),
-      contrast=1.10, black=0.035, white=0.98),
-  'warm_print': dict(title='Majdi Warm Print',
-      pulls=[(110, 55, 0.45), (30, 35, 0.20), (230, 50, 0.20)],
-      chroma=[(30, 40, 1.12), (110, 45, 0.80), (230, 60, 0.78), (300, 50, 0.80)],
-      sat=1.0, hl_desat=0.35, shadow_tint=(0.006, 0.010), high_tint=(0.014, 0.034),
-      contrast=1.08, black=0.03, white=0.97),
-  'night_neon': dict(title='Majdi Night Neon',
-      pulls=[(225, 90, 0.45), (55, 45, 0.25), (150, 70, 0.60), (320, 45, 0.25)],
-      chroma=[(55, 45, 1.15), (225, 80, 1.25), (320, 45, 1.18), (150, 60, 0.60)],
-      sat=1.0, hl_desat=0.40, shadow_tint=(-0.030, -0.048), high_tint=(0.016, 0.022),
-      contrast=1.12, black=0.02, white=0.99),
-  'silver_dramatic': dict(title='Majdi Silver Retention',
-      pulls=[(215, 70, 0.15)],
-      chroma=[(58, 45, 0.95)],
-      sat=0.62, hl_desat=0.60, shadow_tint=(-0.008, -0.014), high_tint=(0.003, 0.006),
-      contrast=1.14, black=0.012, white=0.99),
+  # Hollywood Cinematic: complementary teal/orange separation, warm skin and practicals, deep blacks
+  'hollywood': dict(title='Majdi Hollywood Cinematic',
+      pulls=[(215, 85, 0.50), (58, 50, 0.30), (140, 65, 0.60), (100, 40, 0.30), (270, 40, 0.30)],
+      chroma=[(58, 45, 1.14), (215, 70, 1.22), (140, 55, 0.55), (330, 50, 0.65), (280, 40, 0.75)],
+      sat=0.95, hl_desat=0.45, shadow_tint=(-0.032, -0.036), high_tint=(0.018, 0.032),
+      contrast=1.10, black=0.022, white=0.985),
+  # Moody Film: low-key, desaturated, green-teal shadows, muted highlights
+  'moody_film': dict(title='Majdi Moody Film',
+      pulls=[(170, 70, 0.40), (58, 40, 0.15), (240, 60, 0.30)],
+      chroma=[(58, 45, 0.90), (30, 40, 0.85), (240, 60, 0.75), (140, 60, 0.70)],
+      sat=0.72, hl_desat=0.55, shadow_tint=(-0.022, -0.004), high_tint=(0.006, 0.012),
+      contrast=1.12, black=0.030, white=0.950),
+  # Night Cinema: cool ambient night, warm practical lights (strong luminance colour separation)
+  'night_cinema': dict(title='Majdi Night Cinema',
+      pulls=[(235, 90, 0.45), (60, 45, 0.30), (150, 70, 0.60), (320, 45, 0.20)],
+      chroma=[(60, 45, 1.18), (235, 80, 1.20), (150, 60, 0.55), (320, 45, 1.05)],
+      sat=1.0, hl_desat=0.40, shadow_tint=(-0.024, -0.046), high_tint=(0.022, 0.034),
+      contrast=1.10, black=0.012, white=0.99),
+  # Film Look: colour-negative print feel: warm highlights, cyan-green shadow crossover, faded blacks
+  'film_look': dict(title='Majdi Film Look',
+      pulls=[(110, 55, 0.45), (40, 35, 0.20), (230, 60, 0.30)],
+      chroma=[(40, 40, 1.08), (110, 45, 0.80), (230, 60, 0.82), (300, 50, 0.80)],
+      sat=0.96, hl_desat=0.50, shadow_tint=(-0.014, 0.002), high_tint=(0.012, 0.030),
+      contrast=1.04, black=0.040, white=0.960),
+  # Natural Cinematic: gentle warmth and separation, colours stay true
+  'natural_cinematic': dict(title='Majdi Natural Cinematic',
+      pulls=[(110, 50, 0.20), (215, 60, 0.15)],
+      chroma=[(30, 40, 1.04), (140, 50, 0.90)],
+      sat=1.0, hl_desat=0.30, shadow_tint=(-0.006, -0.008), high_tint=(0.006, 0.012),
+      contrast=1.03, black=0.012, white=0.99),
+  # Dramatic print: restrained palette, cool shadows, silver-like highlights
+  'dramatic_print': dict(title='Majdi Dramatic Print',
+      pulls=[(215, 70, 0.20), (58, 40, 0.10)],
+      chroma=[(58, 45, 0.95), (140, 50, 0.80)],
+      sat=0.82, hl_desat=0.50, shadow_tint=(-0.012, -0.020), high_tint=(0.008, 0.012),
+      contrast=1.10, black=0.010, white=0.99),
 }
 
 def write_cube(path, title, n=33):

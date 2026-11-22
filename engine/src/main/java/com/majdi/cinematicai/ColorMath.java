@@ -38,6 +38,15 @@ final class ColorMath {
         return ENC[i] + (ENC[i + 1] - ENC[i]) * t;
     }
 
+    /** sRGB code value as float (0..255, fractional allowed) -> linear light. */
+    static float decode(float code) {
+        if (code <= 0f) return 0f;
+        if (code >= 255f) return 1f;
+        int i = (int) code;
+        float t = code - i;
+        return SRGB_TO_LINEAR[i] + (SRGB_TO_LINEAR[i + 1] - SRGB_TO_LINEAR[i]) * t;
+    }
+
     static float exp2(float x) {
         return (float) Math.exp(x * LN2);
     }

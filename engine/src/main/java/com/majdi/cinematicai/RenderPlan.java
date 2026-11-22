@@ -4,9 +4,9 @@ import java.io.IOException;
 
 /**
  * Everything needed to render one look at any resolution, prepared once from the preview
- * (working resolution, display orientation): the resolved style, tone model, depth/subject
- * maps, LUT, and the working-resolution layers (lens blur render, sharp weight, halation)
- * that the full-resolution renderer composites strip by strip.
+ * (working resolution, display orientation): the resolved style, tone model, measured statistics,
+ * depth/subject maps, LUT, and the working-resolution layers (lens blur render, sharp weight,
+ * halation) that the full-resolution renderer composites strip by strip.
  */
 final class RenderPlan {
 
@@ -17,72 +17,113 @@ final class RenderPlan {
     final Style style;
     final float strength;
     final ToneModel tone;
+    final SceneStats stats;     // may be null
     final SceneMaps maps;       // may be null (models unavailable)
     final Lut3D lut;            // may be null
-    final String reason;        // Auto Director explanation, or null
+    final String reason;        // description of what was done (Auto)
+    final String isolation;     // "on", "off-no-subject", "off-no-depth", "off" (style without lens)
 
-    // working-resolution layers (display orientation)
+    float fullNoiseSigma = -1f; // noise measured at full resolution (export), if known
+
     int ww, wh;
-    float[] gR, gG, gB;         // graded linear image used as the bokeh base
-    Bokeh bokeh;                // may be null
-    float[] sA, sB;             // guided coefficients of the sharp weight vs. working luma
-    float[] halo;               // halation energy, may be null
+    float[] gR, gG, gB;
+    Bokeh bokeh;
+    float[] sA, sB;
+    float[] halo;
 
-    private RenderPlan(Style st, float strength, ToneModel tone, SceneMaps maps, Lut3D lut, String reason) {
-        this.style = st; this.strength = strength; this.tone = tone; this.maps = maps; this.lut = lut; this.reason = reason;
+    private RenderPlan(Style st, float strength, ToneModel tone, SceneStats stats, SceneMaps maps, Lut3D lut, String reason, String iso) {
+        this.style = st; this.strength = strength; this.tone = tone; this.stats = stats; this.maps = maps;
+        this.lut = lut; this.reason = reason; this.isolation = iso;
     }
 
-    /**
-     * @param px  preview ARGB pixels (display orientation), the same image ToneModel/SceneMaps were built from
-     * @param userLut a user-imported LUT that replaces the Cinematic look's LUT, or null
-     */
-    static RenderPlan build(int[] px, int w, int h, String key, float strength, ToneModel tone, SceneMaps maps,
-                            int faceCount, LutSource luts, Lut3D userLut) throws IOException {
+    /** Noise level for a render at the given size (the preview uses its own measurement). */
+    float noiseSigmaFor(int w, int h) {
+        float pv = stats != null ? stats.noiseSigma : 0f;
+        if (w == ww && h == wh) return pv;
+        if (fullNoiseSigma >= 0f) return fullNoiseSigma;
+        return pv;
+    }
+
+    static RenderPlan build(int[] px, int w, int h, RenderOptions opt, ToneModel tone, SceneStats stats,
+                            SceneMaps maps, int faceCount, LutSource luts) throws IOException {
         Style st;
         String reason = null;
-        if (key.equals("auto")) {
-            AutoDirector.Decision d = AutoDirector.decide(tone, maps, faceCount);
-            st = d.style;
-            reason = d.reason;
-        } else {
-            st = Style.of(key);
-            // adaptive film stock for Cinematic: the night palette under artificial light
-            if (key.equals("cinematic") && tone.p50 < -4.5f) st.lut = "night_neon";
-            // Dramatic at night: keep the scene readable — lift shadows, keep lights vivid,
-            // only gentle depth shaping (everything is "far" in a night scene)
-            if (key.equals("dramatic") && tone.p50 < -4.5f) {
-                st.depthDodge = 0.3f;
-                st.shadowLift = 0.42f;
-                st.toe = 0.002f;
-                st.lut = "night_neon";
-                st.lutAmt = 0.5f;
-                st.sat = 0.95f;
-                st.halation = 0.35f;
+        boolean night = tone.p50 < -4.0f;
+        switch (opt.style) {
+            case "auto": {
+                AutoDirector.Decision d = AutoDirector.decide(tone, stats, maps, faceCount);
+                st = d.style;
+                reason = d.description;
+                break;
+            }
+            case "fusion":
+                st = new Style();
+                Style.fusion(st, opt.cinematic, opt.dramatic, opt.dslr, opt.depthBlur, night);
+                break;
+            case "cinematic":
+                st = Style.of("cinematic", opt.preset.isEmpty() ? (night ? "night" : "hollywood") : opt.preset);
+                break;
+            case "dramatic":
+                st = Style.of("dramatic");
+                if (night) { st.depthDodge = 0.15f; st.nightKeep = 0.8f; st.shadowLift = 0.46f; }
+                break;
+            default:
+                st = Style.of(opt.style);
+        }
+        if (st.bokeh) { st.focal = opt.focal; st.aperture = opt.aperture; }
+
+        // ---- lens isolation gate: real depth AND a trusted focus (tap, reliable subject or face)
+        String iso = "off";
+        boolean useSubject = false;
+        float focus = 0f;
+        if (st.bokeh) {
+            if (maps == null || !maps.hasDepth()) {
+                iso = "off-no-depth";
+            } else if (opt.focus != null) {
+                focus = maps.depthAt(opt.focus[0], opt.focus[1]);
+                useSubject = maps.hasSubject && maps.subjectAt(opt.focus[0], opt.focus[1]) > 0.5f;
+                iso = "on";
+            } else if (maps.subjectReliable()) {
+                focus = maps.focus;
+                useSubject = true;
+                iso = "on";
+            } else if (faceCount > 0 && tone.faces.length > 0) {
+                float[] f = tone.faces[0];
+                focus = maps.depthAt((f[0] + f[2]) / 2f, (f[1] + f[3]) / 2f);
+                iso = "on";
+            } else {
+                iso = "off-no-subject";
             }
         }
-        if (st.bokeh && (maps == null || !maps.hasDepth())) st.bokeh = false;  // never fake a depth blur
+
         Lut3D lut = null;
-        if (key.equals("cinematic") && userLut != null) lut = userLut;
+        if (opt.style.equals("cinematic") && opt.userLut != null) lut = opt.userLut;
         else if (st.lut != null && st.lutAmt > 0f && luts != null) lut = luts.load(st.lut);
 
-        RenderPlan plan = new RenderPlan(st, strength, tone, maps, lut, reason);
+        RenderPlan plan = new RenderPlan(st, opt.strength, tone, stats, maps, lut, reason, iso);
         plan.ww = w;
         plan.wh = h;
-        boolean needBase = st.bokeh || st.halation > 0f;
-        if (needBase) {
+        boolean lens = iso.equals("on") && opt.strength > 0.01f && st.blurAmt > 0.01f;
+        if (lens || st.halation > 0f) {
             GradeCore core = new GradeCore(plan, w, h, 1);
             float[][] g = core.gradeLinear(px);
             plan.gR = g[0]; plan.gG = g[1]; plan.gB = g[2];
         }
         int n = w * h;
-        float[] lum = new float[n];
-        for (int i = 0; i < n; i++) {
-            int c = px[i];
-            lum[i] = (0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255)) / 255f;
-        }
-        if (st.bokeh && strength > 0.01f) {
-            float radius = st.bokehRadius * Math.max(w, h) * strength;
-            plan.bokeh = Bokeh.render(plan.gR, plan.gG, plan.gB, maps.depth, maps.subject, w, h, maps.focus, radius, st.depthOfField);
+        if (lens) {
+            float[] lum = new float[n];
+            for (int i = 0; i < n; i++) {
+                int c = px[i];
+                lum[i] = (0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255)) / 255f;
+            }
+            // lens simulation (visual approximation): blur grows with focal length and opening,
+            // depth of field widens with smaller apertures and shorter lenses
+            float lensK = st.focal <= 35 ? 0.55f : (st.focal >= 85 ? 1.7f : 1.0f);
+            float apK = 1.8f / Math.max(1.8f, st.aperture);
+            float radius = Math.max(w, h) * 0.020f * lensK * apK * st.blurAmt * opt.strength;
+            float dof = 0.025f * (st.aperture / 1.8f) * (float) Math.sqrt(50.0 / st.focal);
+            float[] subj = useSubject ? maps.subject : new float[n];
+            plan.bokeh = Bokeh.render(plan.gR, plan.gG, plan.gB, maps.depth, subj, w, h, focus, radius, dof);
             float[][] ab = Guided.guidedCoeffs(lum, plan.bokeh.sharp, w, h, 2, 1e-4f);
             plan.sA = ab[0];
             plan.sB = ab[1];
