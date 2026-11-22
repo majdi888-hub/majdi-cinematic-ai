@@ -23,22 +23,61 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Load release key from secrets (if configured)
+        env:
+          KEY_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          KEY_PASS: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -n "$KEY_B64" ] && [ -n "$KEY_PASS" ]; then
+            echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "SIGNING_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+            echo "Release key loaded"
+          else
+            echo "No release key secret: signing with a valid debug key"
+          fi
+
       - name: Build APK
         run: gradle assembleRelease --no-daemon --stacktrace
 
-      - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk MajdiCinematicAI.apk
+      - name: Verify signature with official Android tools
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          APK=app/build/outputs/apk/release/app-release.apk
+          cp "$APK" MajdiCinematicAI.apk
+          {
+            echo "## Signature check (apksigner $("$BT/apksigner" --version))"
+            echo '```'
+            "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 MajdiCinematicAI.apk
+            echo '```'
+            echo "## Alignment check (zipalign)"
+            echo '```'
+            "$BT/zipalign" -c 4 MajdiCinematicAI.apk && echo "zipalign: OK"
+            echo '```'
+            echo "## Package info (aapt2)"
+            echo '```'
+            "$BT/aapt2" dump badging MajdiCinematicAI.apk | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|native-code|launchable)" || true
+            echo '```'
+            echo "SHA-256 of file: $(sha256sum MajdiCinematicAI.apk | cut -d' ' -f1)"
+          } | tee verification.md
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verification.md
+          grep -q "^Verifies" verification.md
 
       - uses: actions/upload-artifact@v4
         with:
           name: MajdiCinematicAI
-          path: MajdiCinematicAI.apk
+          path: |
+            MajdiCinematicAI.apk
+            verification.md
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: Majdi Cinematic AI v1.0.${{ github.run_number }}
-          body: ملف APK جاهز للتثبيت على Samsung S25 Ultra.
-          files: MajdiCinematicAI.apk
+          body_path: verification.md
+          files: |
+            MajdiCinematicAI.apk
+            verification.md
           make_latest: true

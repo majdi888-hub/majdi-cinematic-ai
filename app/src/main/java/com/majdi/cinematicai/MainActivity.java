@@ -446,9 +446,9 @@ public class MainActivity extends Activity {
                 if (dec != null) {
                     BitmapFactory.Options op = new BitmapFactory.Options();
                     op.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                    if (reuse != null && reuse.getHeight() == rows && reuse.getWidth() == W) {
+                    op.inMutable = true; // required so the strip bitmap can be reused
+                    if (reuse != null && reuse.isMutable() && reuse.getHeight() == rows && reuse.getWidth() == W) {
                         op.inBitmap = reuse;
-                        op.inMutable = true;
                     }
                     Bitmap region = dec.decodeRegion(new Rect(0, ys, W, ye), op);
                     if (region == null) throw new IOException("region decode failed");
