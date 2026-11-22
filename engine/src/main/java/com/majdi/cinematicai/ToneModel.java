@@ -17,15 +17,23 @@ final class ToneModel {
     final int gw, gh;
     final float[] meanA, meanB;
     final float[] smoothI;   // fully smooth log2 illumination (used for face gain)
+    /** Mid-scale edge-aware layer (about 1% of the frame): drives local contrast / clarity. */
+    final int gw2, gh2;
+    final float[] midA, midB;
     final float p01, p50, p99;
     final float[][] faces;   // {left, top, right, bottom} normalized, display orientation
 
-    private ToneModel(int gw, int gh, float[] a, float[] b, float[] si, float p01, float p50, float p99, float[][] faces) {
+    private ToneModel(int gw, int gh, float[] a, float[] b, float[] si, int gw2, int gh2, float[] a2, float[] b2,
+                      float p01, float p50, float p99, float[][] faces) {
         this.gw = gw;
         this.gh = gh;
         this.meanA = a;
         this.meanB = b;
         this.smoothI = si;
+        this.gw2 = gw2;
+        this.gh2 = gh2;
+        this.midA = a2;
+        this.midB = b2;
         this.p01 = p01;
         this.p50 = p50;
         this.p99 = p99;
@@ -52,6 +60,11 @@ final class ToneModel {
         int[] hist = new int[bins];
         // ---- low-resolution grid of mean linear luminance
         float s = Math.min(1f, 384f / Math.max(w, h));
+        float s2 = Math.min(1f, 768f / Math.max(w, h));
+        int gw2 = Math.max(4, Math.round(w * s2));
+        int gh2 = Math.max(4, Math.round(h * s2));
+        double[] sum2 = new double[gw2 * gh2];
+        int[] cnt2 = new int[gw2 * gh2];
         int gw = Math.max(4, Math.round(w * s));
         int gh = Math.max(4, Math.round(h * s));
         double[] sum = new double[gw * gh];
@@ -68,6 +81,10 @@ final class ToneModel {
                 int gx = Math.min(gw - 1, (int) ((x + 0.5f) * gw / w));
                 sum[gy * gw + gx] += Y;
                 cnt[gy * gw + gx]++;
+                int gx2 = Math.min(gw2 - 1, (int) ((x + 0.5f) * gw2 / w));
+                int gy2 = Math.min(gh2 - 1, (int) ((y + 0.5f) * gh2 / h));
+                sum2[gy2 * gw2 + gx2] += Y;
+                cnt2[gy2 * gw2 + gx2]++;
             }
         }
         long total = (long) w * h;
@@ -99,7 +116,18 @@ final class ToneModel {
         float[] mB = boxMean(b, gw, gh, r);
 
         float[] sI = boxMean(boxMean(I, gw, gh, r), gw, gh, r);
-        return new ToneModel(gw, gh, mA, mB, sI, p01, p50, p99, faces == null ? new float[0][] : faces);
+
+        // ---- mid-scale guided layer for local contrast
+        int n2 = gw2 * gh2;
+        float[] I2m = new float[n2];
+        for (int i = 0; i < n2; i++) {
+            double mm = cnt2[i] > 0 ? sum2[i] / cnt2[i] : 0.18;
+            I2m[i] = (float) (Math.log(mm + EPS) * ColorMath.INV_LN2);
+        }
+        int r2 = Math.max(2, Math.round(Math.max(gw2, gh2) / 96f));
+        float[][] ab2 = Guided.guidedCoeffs(I2m, I2m, gw2, gh2, r2, 0.06f);
+
+        return new ToneModel(gw, gh, mA, mB, sI, gw2, gh2, ab2[0], ab2[1], p01, p50, p99, faces == null ? new float[0][] : faces);
     }
 
     private static float percentile(int[] hist, long total, double q, float lo, float hi) {

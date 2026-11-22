@@ -1,0 +1,32 @@
+plugins {
+    id 'java-library'
+}
+
+// Pure-Java imaging engine shared by the Android app and the JVM test suite.
+// ONNX Runtime has the same Java API (package ai.onnxruntime) on Android and desktop:
+// the app ships onnxruntime-android, the tests run the desktop runtime with the same code.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    compileOnly 'com.microsoft.onnxruntime:onnxruntime:1.20.0'
+    testImplementation 'com.microsoft.onnxruntime:onnxruntime:1.20.0'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+test {
+    maxHeapSize = '6g'
+    systemProperty 'models.dir', System.getenv('MODELS_DIR') ?: ''
+    systemProperty 'test.out', System.getenv('TEST_OUT') ?: "${buildDir}/test-output"
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        showStandardStreams = true
+        exceptionFormat = 'full'
+    }
+}

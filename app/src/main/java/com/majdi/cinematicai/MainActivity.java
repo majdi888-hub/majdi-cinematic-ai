@@ -48,10 +48,12 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK = 11;
-    private static final int PREVIEW_MAX = 2048;
+    private static final int REQ_LUT = 12;
+    /** working resolution: preview, scene analysis and the lens-blur render */
+    private static final int PREVIEW_MAX = 1600;
 
-    private static final String[] STYLE_KEYS = {"natural", "cinematic", "dramatic", "dslr"};
-    private static final String[] STYLE_NAMES = {"طبيعي\nNatural", "سينمائي\nCinematic", "درامي\nDramatic", "احترافي\nDSLR"};
+    private static final String[] STYLE_KEYS = {"auto", "natural", "cinematic", "dramatic", "dslr"};
+    private static final String[] STYLE_NAMES = {"تلقائي\nAI Auto", "طبيعي\nNatural", "سينمائي\nCinematic", "درامي\nDramatic", "احترافي\nDSLR"};
 
     private static final int BG = Color.rgb(14, 15, 19);
     private static final int CARD = Color.rgb(30, 32, 40);
@@ -66,7 +68,13 @@ public class MainActivity extends Activity {
     private Bitmap previewOriginal, previewResult;
     private List<RectF> faces = new ArrayList<>();
     private ToneModel model;
-    private String style = "natural";
+    private SceneMaps maps;
+    private int[] previewPx;
+    private RenderPlan currentPlan;
+    private Lut3D userLut;
+    private ModelStore models;
+    private final java.util.Map<String, Lut3D> lutCache = new java.util.HashMap<>();
+    private String style = "auto";
     private int strength = 60;   // moderate by default; can be raised manually
     private Uri lastSaved;
     private int renderToken = 0;
@@ -79,6 +87,8 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
+        models = new ModelStore(this);
+        loadUserLut();
         buildUi();
         handleIncoming(getIntent());
     }
@@ -170,7 +180,13 @@ public class MainActivity extends Activity {
         for (int i = 0; i < STYLE_KEYS.length; i++) {
             final int idx = i;
             Button b = makeButton(STYLE_NAMES[i]);
+            b.setTextSize(12);
+            b.setPadding(dp(2), dp(6), dp(2), dp(6));
             b.setOnClickListener(v -> selectStyle(STYLE_KEYS[idx]));
+            if (STYLE_KEYS[i].equals("cinematic")) {
+                // long press: import a .cube 3D LUT to use as the Cinematic film look
+                b.setOnLongClickListener(v -> { pickLut(); return true; });
+            }
             styleButtons[i] = b;
             styles.addView(b);
         }
@@ -269,6 +285,8 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK && resultCode == RESULT_OK && data != null && data.getData() != null) {
             loadImage(data.getData());
+        } else if (requestCode == REQ_LUT && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            importLut(data.getData());
         }
     }
 
@@ -298,17 +316,35 @@ public class MainActivity extends Activity {
             try {
                 Bitmap bmp = decode(uri, PREVIEW_MAX);
                 List<RectF> f = detectFaces(bmp);
-                ToneModel tm = ImageEngine.analyze(bmp, f);
-                Bitmap res = ImageEngine.process(bmp, st, s, tm);
+                int[] px = ImageEngine.pixels(bmp);
+                float[][] fa = ImageEngine.faces(f);
+                ToneModel tm = ToneModel.build(px, bmp.getWidth(), bmp.getHeight(), fa);
+                ui.post(() -> status.setText("تحليل العمق وعزل الموضوع بالذكاء الاصطناعي على الهاتف…"));
+                SceneMaps sm = null;
+                String note = "";
+                try {
+                    SceneAnalyzer an = models.analyzer();
+                    if (an != null) sm = an.analyze(px, bmp.getWidth(), bmp.getHeight(), fa);
+                    else note = " — نماذج الذكاء الاصطناعي غير متاحة";
+                } catch (Throwable e) {
+                    note = " — تعذّر تشغيل نموذج العمق";
+                }
+                final SceneMaps fsm = sm;
+                final String fnote = note;
+                RenderPlan plan = RenderPlan.build(px, bmp.getWidth(), bmp.getHeight(), st, s, tm, sm, f.size(), this::lut, userLut);
+                Bitmap res = ImageEngine.render(plan, px, bmp.getWidth(), bmp.getHeight());
                 ui.post(() -> {
                     previewOriginal = bmp;
+                    previewPx = px;
                     faces = f;
                     model = tm;
+                    maps = fsm;
                     if (token == renderToken) {
+                        currentPlan = plan;
                         previewResult = res;
                         imageView.setImageBitmap(res);
                     }
-                    status.setText(facesText(f.size()));
+                    status.setText(statusFor(plan, f.size()) + fnote);
                     setBusy(false);
                     if (token != renderToken) renderPreview();
                 });
@@ -329,18 +365,28 @@ public class MainActivity extends Activity {
         final float s = strength / 100f;
         final ToneModel tm = model;
         if (tm == null) return;
+        final int[] px = previewPx;
+        final SceneMaps sm = maps;
+        final int nf = faces.size();
+        final Lut3D ul = userLut;
         final int token = ++renderToken;
+        currentPlan = null;
+        if (st.equals("dslr") || st.equals("auto")) status.setText("جارٍ محاكاة عزل العدسة حسب العمق…");
         worker.execute(() -> {
             if (token != renderToken) return;
             try {
-                Bitmap res = ImageEngine.process(base, st, s, tm);
+                RenderPlan plan = RenderPlan.build(px, base.getWidth(), base.getHeight(), st, s, tm, sm, nf, this::lut, ul);
+                Bitmap res = ImageEngine.render(plan, px, base.getWidth(), base.getHeight());
                 ui.post(() -> {
                     if (token == renderToken) {
+                        currentPlan = plan;
                         previewResult = res;
                         imageView.setImageBitmap(res);
+                        status.setText(statusFor(plan, nf));
                     }
                 });
-            } catch (Throwable ignored) {
+            } catch (Throwable e) {
+                ui.post(() -> status.setText("تعذّرت المعالجة"));
             }
         });
     }
@@ -356,14 +402,17 @@ public class MainActivity extends Activity {
         }
         final String st = style;
         final float s = strength / 100f;
-        final ToneModel tm = model;
-        if (tm == null) return;
+        final RenderPlan plan = currentPlan;
+        if (plan == null) {
+            Toast.makeText(this, "انتظر اكتمال المعاينة", Toast.LENGTH_SHORT).show();
+            return;
+        }
         final Uri src = sourceUri;
         setBusy(true);
         status.setText("جارٍ الحفظ بالدقة الأصلية…");
         worker.execute(() -> {
             try {
-                ExportResult res = exportFullRes(src, st, s, tm);
+                ExportResult res = exportFullRes(src, st, plan);
                 ui.post(() -> {
                     lastSaved = res.uri;
                     setBusy(false);
@@ -393,7 +442,7 @@ public class MainActivity extends Activity {
      * Pixels stay in their stored orientation and the EXIF orientation tag is written to the output.
      */
     @SuppressWarnings("deprecation")
-    private ExportResult exportFullRes(Uri src, String st, float s, ToneModel tm) throws IOException {
+    private ExportResult exportFullRes(Uri src, String st, RenderPlan plan) throws IOException {
         int orient = readOrientation(src);
 
         BitmapRegionDecoder dec = null;
@@ -437,7 +486,7 @@ public class MainActivity extends Activity {
             OutputStream os = new BufferedOutputStream(raw, 1 << 20);
             JpegStreamWriter jw = new JpegStreamWriter(os, W, H, 95, orient);
             // same analysis as the preview; stored pixels are mapped to the displayed orientation
-            GradeCore core = new GradeCore(st, s, tm, W, H, orient);
+            GradeCore core = new GradeCore(plan, W, H, orient);
             int strip = ImageEngine.STRIP;
             int[] in = new int[W * (strip + 2)];
             int[] o = new int[W * strip];
@@ -507,6 +556,77 @@ public class MainActivity extends Activity {
         send.putExtra(Intent.EXTRA_STREAM, uri);
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivity(Intent.createChooser(send, "مشاركة الصورة"));
+    }
+
+    private String statusFor(RenderPlan plan, int nFaces) {
+        if (plan.reason != null) return plan.reason;
+        String k = plan.style.key;
+        if (k.equals("dslr")) {
+            if (plan.bokeh != null) return "عزل عدسة حقيقي حسب خريطة العمق — الموضوع حاد والخلفية بحسب بعدها";
+            return "لا تتوفر خريطة عمق لهذه الصورة — لم يُطبّق العزل";
+        }
+        if (k.equals("cinematic")) {
+            String lt = plan.lut != null ? plan.lut.title : "";
+            return "محاكاة فيلم سينمائي — " + lt + (userLut != null ? " (LUT مستورد)" : "");
+        }
+        if (k.equals("dramatic")) return "تباين محلي وإضاءة موضعية حسب العمق";
+        return facesText(nFaces);
+    }
+
+    /** Built-in film LUTs are packaged as Java resources of the engine module. */
+    private Lut3D lut(String name) throws IOException {
+        Lut3D l = lutCache.get(name);
+        if (l == null) {
+            try (InputStream in = GradeCore.class.getResourceAsStream("/luts/" + name + ".cube")) {
+                if (in == null) throw new IOException("missing LUT " + name);
+                l = Lut3D.parse(in);
+            }
+            lutCache.put(name, l);
+        }
+        return l;
+    }
+
+    private void pickLut() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, REQ_LUT);
+        Toast.makeText(this, "اختر ملف LUT بصيغة .cube", Toast.LENGTH_SHORT).show();
+    }
+
+    private void importLut(Uri uri) {
+        worker.execute(() -> {
+            try {
+                byte[] data;
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    data = bo.toByteArray();
+                }
+                Lut3D l = Lut3D.parse(new java.io.ByteArrayInputStream(data));
+                try (java.io.FileOutputStream fo = new java.io.FileOutputStream(new java.io.File(getFilesDir(), "user.cube"))) {
+                    fo.write(data);
+                }
+                ui.post(() -> {
+                    userLut = l;
+                    Toast.makeText(this, "تم تحميل LUT: " + l.title + " (" + l.size + "³)", Toast.LENGTH_LONG).show();
+                    selectStyle("cinematic");
+                });
+            } catch (Throwable e) {
+                ui.post(() -> Toast.makeText(this, "ملف LUT غير صالح", Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void loadUserLut() {
+        java.io.File f = new java.io.File(getFilesDir(), "user.cube");
+        if (!f.exists()) return;
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            userLut = Lut3D.parse(in);
+        } catch (Throwable ignored) {
+        }
     }
 
     private Bitmap decode(Uri uri, int maxSide) throws IOException {

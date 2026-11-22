@@ -12,7 +12,14 @@ android {
         targetSdk 34
         // Each cloud build gets a higher version so it installs as an update
         versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1') + 1
-        versionName "1.0.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+        versionName "2.0.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+        // Samsung Galaxy S25 Ultra is arm64; one ABI keeps the native runtime small
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    // models are memory-mapped/copied as-is: never compress them
+    androidResources {
+        noCompress 'onnx'
     }
 
     // Release key comes only from a protected GitHub secret (never stored in the repository).
@@ -50,6 +57,11 @@ android {
         abortOnError false
         checkReleaseBuilds false
     }
+}
+
+dependencies {
+    implementation project(':engine')
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
 }
 
 tasks.withType(JavaCompile).configureEach {

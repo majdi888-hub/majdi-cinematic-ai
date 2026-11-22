@@ -5,41 +5,45 @@ import android.graphics.RectF;
 
 import java.util.List;
 
-/** Preview rendering and scene analysis on Bitmaps, using the same strip-based core as the export. */
+/** Bitmap glue between Android and the pure-Java engine. */
 final class ImageEngine {
 
     private ImageEngine() {}
 
     static final int STRIP = 128;
 
-    /** Analyses the (display-oriented) preview once; the result drives preview and export alike. */
-    static ToneModel analyze(Bitmap preview, List<RectF> faces) {
-        int w = preview.getWidth(), h = preview.getHeight();
+    static int[] pixels(Bitmap b) {
+        int w = b.getWidth(), h = b.getHeight();
         int[] px = new int[w * h];
-        preview.getPixels(px, 0, w, 0, 0, w, h);
+        b.getPixels(px, 0, w, 0, 0, w, h);
+        return px;
+    }
+
+    static float[][] faces(List<RectF> faces) {
         float[][] f = new float[faces == null ? 0 : faces.size()][];
         for (int i = 0; i < f.length; i++) {
             RectF r = faces.get(i);
             f[i] = new float[]{r.left, r.top, r.right, r.bottom};
         }
-        return ToneModel.build(px, w, h, f);
+        return f;
     }
 
-    static Bitmap process(Bitmap src, String style, float strength, ToneModel model) {
-        int w = src.getWidth();
-        int h = src.getHeight();
-        GradeCore core = new GradeCore(style, strength, model, w, h, 1);
-        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+    /** Renders the preview with the plan (same strip renderer as the full-resolution export). */
+    static Bitmap render(RenderPlan plan, int[] px, int w, int h) {
+        GradeCore core = new GradeCore(plan, w, h, 1);
+        int[] out = new int[w * h];
         int[] in = new int[w * (STRIP + 2)];
         int[] o = new int[w * STRIP];
         for (int y0 = 0; y0 < h; y0 += STRIP) {
             int y1 = Math.min(h, y0 + STRIP);
             int ys = Math.max(0, y0 - 1);
             int ye = Math.min(h, y1 + 1);
-            src.getPixels(in, 0, w, 0, ys, w, ye - ys);
+            System.arraycopy(px, ys * w, in, 0, (ye - ys) * w);
             core.processStrip(in, ys, ye - ys, y0, y1, o);
-            out.setPixels(o, 0, w, 0, y0, w, y1 - y0);
+            System.arraycopy(o, 0, out, y0 * w, (y1 - y0) * w);
         }
-        return out;
+        Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        b.setPixels(out, 0, w, 0, 0, w, h);
+        return b;
     }
 }

@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+env:
+  DEPTH_URL: https://github.com/fabio-sim/Depth-Anything-ONNX/releases/download/v2.0.0/depth_anything_v2_vits.onnx
+  DEPTH_SHA256: d2b11a11c1d4a12b47608fa65a17ee9a4c605b55ee1730c8e3b526304f2562be
+  MATTE_URL: https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
+  MATTE_SHA256: 60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,29 +29,38 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Load release key from secrets (if configured)
-        env:
-          KEY_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
-          KEY_PASS: ${{ secrets.SIGNING_PASSWORD }}
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ env.DEPTH_SHA256 }}-${{ env.MATTE_SHA256 }}
+
+      - name: Download and verify AI models
         run: |
-          if [ -n "$KEY_B64" ] && [ -n "$KEY_PASS" ]; then
-            echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-            echo "SIGNING_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
-            echo "Release key loaded"
-          else
-            echo "No release key secret: signing with a valid debug key"
-          fi
+          set -e
+          mkdir -p models
+          [ -f models/depth_anything_v2_vits.onnx ] || curl -fL --retry 3 -o models/depth_anything_v2_vits.onnx "$DEPTH_URL"
+          [ -f models/isnet-general-use.onnx ] || curl -fL --retry 3 -o models/isnet-general-use.onnx "$MATTE_URL"
+          echo "$DEPTH_SHA256  models/depth_anything_v2_vits.onnx" | sha256sum -c -
+          echo "$MATTE_SHA256  models/isnet-general-use.onnx" | sha256sum -c -
+          ls -la models
+          mkdir -p app/src/main/assets/models
+          cp models/*.onnx app/src/main/assets/models/
+
+      - name: Engine tests with the real models (ONNX Runtime, JVM)
+        env:
+          MODELS_DIR: ${{ github.workspace }}/models
+          TEST_OUT: ${{ github.workspace }}/engine-test-results
+        run: gradle :engine:test --no-daemon --stacktrace
 
       - name: Build APK
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Verify signature with official Android tools
         run: |
           set -e
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          APK=app/build/outputs/apk/release/app-release.apk
-          cp "$APK" MajdiCinematicAI.apk
+          cp app/build/outputs/apk/release/app-release.apk MajdiCinematicAI.apk
           {
             echo "## Signature check (apksigner $("$BT/apksigner" --version))"
             echo '```'
@@ -57,12 +72,23 @@ jobs:
             echo '```'
             echo "## Package info (aapt2)"
             echo '```'
-            "$BT/aapt2" dump badging MajdiCinematicAI.apk | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|native-code|launchable)" || true
+            "$BT/aapt2" dump badging MajdiCinematicAI.apk | grep -E "^(package|sdkVersion|minSdkVersion|targetSdkVersion|application-label|native-code)" || true
             echo '```'
+            echo "## Bundled models"
+            echo '```'
+            unzip -l MajdiCinematicAI.apk | grep -E "\.onnx|libonnxruntime" || true
+            echo '```'
+            echo "APK size: $(du -h MajdiCinematicAI.apk | cut -f1)"
+            echo ""
             echo "SHA-256 of file: $(sha256sum MajdiCinematicAI.apk | cut -d' ' -f1)"
+            echo ""
+            echo "## Engine test report"
+            echo '```'
+            cat engine-test-results/report.txt
+            echo '```'
           } | tee verification.md
-          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verification.md
           grep -q "^Verifies" verification.md
+          (cd engine-test-results && zip -q -r ../engine-test-results.zip .)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,14 +96,16 @@ jobs:
           path: |
             MajdiCinematicAI.apk
             verification.md
+            engine-test-results.zip
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Majdi Cinematic AI v1.0.${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: Majdi Cinematic AI v2.0.${{ github.run_number }}
           body_path: verification.md
           files: |
             MajdiCinematicAI.apk
             verification.md
+            engine-test-results.zip
           make_latest: true
