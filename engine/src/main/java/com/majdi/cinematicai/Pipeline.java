@@ -30,9 +30,32 @@ final class Pipeline {
 
     int halo() { return GradeCore.HALO * Math.max(1, stages.size()); }
 
+    /**
+     * Reuses the stages (plan + rendered output) of the previous build whose inputs did not change,
+     * so moving an Adjust slider does not re-run the looks before it. Keyed on the exact source
+     * pixels array and the serialized prefix of the edit.
+     */
+    static final class Cache {
+        int[] source;
+        final java.util.Map<String, RenderPlan> plans = new java.util.HashMap<>();
+        final java.util.Map<String, int[]> outs = new java.util.HashMap<>();
+        void reset(int[] src) { source = src; plans.clear(); outs.clear(); }
+    }
+
     static Pipeline build(int[] px, int w, int h, EditState st, SceneMaps maps, float[][] faces,
                           RenderPlan.LutSource luts, ImportedLuts imported) throws IOException {
+        return build(px, w, h, st, maps, faces, luts, imported, null);
+    }
+
+    static Pipeline build(int[] px, int w, int h, EditState st, SceneMaps maps, float[][] faces,
+                          RenderPlan.LutSource luts, ImportedLuts imported, Cache cache) throws IOException {
         Pipeline p = new Pipeline();
+        if (cache != null && cache.source != px) cache.reset(px);
+        StringBuilder key = new StringBuilder();
+        java.util.Map<String, Object> lens = st.toMap();
+        key.append(Json.write(lens.get("lens")));
+        java.util.Map<String, RenderPlan> usedPlans = new java.util.HashMap<>();
+        java.util.Map<String, int[]> usedOuts = new java.util.HashMap<>();
         int[] cur = px;
         int nf = faces == null ? 0 : faces.length;
         int enabled = 0;
@@ -46,16 +69,30 @@ final class Pipeline {
                 lut = imported == null ? null : imported.get(l.filter.substring(4));
                 if (lut == null) continue;          // missing import: skipped, never faked
             }
-            RenderOptions o = FilterLibrary.optionsFor(l, st, lut);
-            ToneModel tone = ToneModel.build(cur, w, h, faces);
-            SceneStats stats = SceneStats.measure(cur, w, h);
-            RenderPlan plan = RenderPlan.build(cur, w, h, o, tone, stats, maps, nf, luts);
+            key.append('|').append(l.filter).append('@').append(l.strength);
+            String k = key.toString();
+            RenderPlan plan = cache != null ? cache.plans.get(k) : null;
+            if (plan == null) {
+                RenderOptions o = FilterLibrary.optionsFor(l, st, lut);
+                ToneModel tone = ToneModel.build(cur, w, h, faces);
+                SceneStats stats = SceneStats.measure(cur, w, h);
+                plan = RenderPlan.build(cur, w, h, o, tone, stats, maps, nf, luts);
+            }
+            usedPlans.put(k, plan);
             p.stages.add(plan);
             p.labels.add(l.filter);
             if (plan.style.bokeh) { p.isolation = plan.isolation; if (plan.focusMask != null) p.focusMask = plan.focusMask; }
             if (plan.reason != null) p.reason = plan.reason;
             done++;
-            if (done < enabled || adjust) cur = renderStage(plan, cur, w, h);
+            if (done < enabled || adjust) {
+                int[] c = cache != null ? cache.outs.get(k) : null;
+                cur = c != null ? c : renderStage(plan, cur, w, h);
+                usedOuts.put(k, cur);
+            }
+        }
+        if (cache != null) {   // keep only what this edit uses
+            cache.plans.clear(); cache.plans.putAll(usedPlans);
+            cache.outs.clear(); cache.outs.putAll(usedOuts);
         }
         if (adjust) {
             RenderOptions o = new RenderOptions();
@@ -70,12 +107,84 @@ final class Pipeline {
         return p;
     }
 
-    /** One stage over a whole working-resolution image (same strip renderer as the export). */
+    static int threads() {
+        return Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors()));
+    }
+
+    /**
+     * One stage over a whole working-resolution image, split into row bands rendered in parallel
+     * (one GradeCore per band; results are identical to a single pass, verified by the tests).
+     */
     static int[] renderStage(RenderPlan plan, int[] px, int w, int h) {
-        GradeCore core = new GradeCore(plan, w, h, 1);
         int[] out = new int[w * h];
-        core.processStrip(px, 0, h, 0, h, out);
+        int t = Math.min(threads(), Math.max(1, h / 64));
+        if (t <= 1) {
+            new GradeCore(plan, w, h, 1).processStrip(px, 0, h, 0, h, out);
+            return out;
+        }
+        java.util.concurrent.ExecutorService ex = java.util.concurrent.Executors.newFixedThreadPool(t);
+        try {
+            List<java.util.concurrent.Future<?>> fs = new ArrayList<>();
+            int band = (h + t - 1) / t;
+            for (int i = 0; i < t; i++) {
+                final int y0 = i * band, y1 = Math.min(h, y0 + band);
+                if (y0 >= y1) break;
+                fs.add(ex.submit(() -> {
+                    int ys = Math.max(0, y0 - GradeCore.HALO), ye = Math.min(h, y1 + GradeCore.HALO);
+                    int[] o = new int[(y1 - y0) * w];
+                    new GradeCore(plan, w, h, 1).processStrip(java.util.Arrays.copyOfRange(px, ys * w, ye * w), ys, ye - ys, y0, y1, o);
+                    System.arraycopy(o, 0, out, y0 * w, o.length);
+                    return null;
+                }));
+            }
+            for (java.util.concurrent.Future<?> f : fs) f.get();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            ex.shutdown();
+        }
         return out;
+    }
+
+    /** Supplies source rows [ys, ye) (full width). Called from several threads. */
+    interface RowSource { void read(int ys, int ye, int[] dst) throws Exception; }
+    /** Receives finished output rows [y0, y1) strictly in top-to-bottom order. */
+    interface RowSink { void write(int y0, int y1, int[] rows) throws Exception; }
+
+    /**
+     * Full-resolution render on all cores: strips are graded in parallel (each worker owns its
+     * renderer) and delivered to the sink in order, with a bounded number in flight to cap memory.
+     */
+    void renderParallel(int w, int h, int orientation, int strip, RowSource src, RowSink sink) throws Exception {
+        int t = threads();
+        java.util.concurrent.ExecutorService ex = java.util.concurrent.Executors.newFixedThreadPool(t);
+        final ThreadLocal<Strips> local = ThreadLocal.withInitial(() -> new Strips(w, h, orientation));
+        try {
+            java.util.ArrayDeque<java.util.concurrent.Future<int[]>> q = new java.util.ArrayDeque<>();
+            java.util.ArrayDeque<int[]> ranges = new java.util.ArrayDeque<>();
+            int y = 0;
+            while (y < h || !q.isEmpty()) {
+                while (y < h && q.size() < 2 * t) {
+                    final int y0 = y, y1 = Math.min(h, y + strip);
+                    q.add(ex.submit(() -> {
+                        Strips sp = local.get();
+                        int hal = sp.halo();
+                        int ys = Math.max(0, y0 - hal), ye = Math.min(h, y1 + hal);
+                        int[] in = new int[(ye - ys) * w];
+                        src.read(ys, ye, in);
+                        int[] o = new int[(y1 - y0) * w];
+                        sp.process(in, ys, ye - ys, y0, y1, o);
+                        return o;
+                    }));
+                    ranges.add(new int[]{y0, y1});
+                    y = y1;
+                }
+                int[] r = ranges.poll();
+                sink.write(r[0], r[1], q.poll().get());
+            }
+        } finally {
+            ex.shutdownNow();
+        }
     }
 
     /** Renders the whole chain at the image's own size (preview). With no stages, a copy. */
