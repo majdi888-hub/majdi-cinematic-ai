@@ -47,7 +47,10 @@ jobs:
           mkdir -p app/src/main/assets/models
           cp models/*.onnx app/src/main/assets/models/
 
-      - name: Engine tests with the real models (ONNX Runtime, JVM)
+      - name: Compile app (fast failure before the long tests)
+        run: gradle :app:compileReleaseJavaWithJavac --no-daemon --stacktrace
+
+      - name: Engine and Studio tests with the real models (ONNX Runtime, JVM)
         env:
           MODELS_DIR: ${{ github.workspace }}/models
           TEST_OUT: ${{ github.workspace }}/engine-test-results
@@ -86,6 +89,10 @@ jobs:
             echo '```'
             cat engine-test-results/report.txt
             echo '```'
+            echo "## Studio test report (stack, Adjust, import, geometry, frames, projects, export)"
+            echo '```'
+            cat engine-test-results/studio/studio-report.txt || true
+            echo '```'
           } | tee verification.md
           grep -q "^Verifies" verification.md
           (cd engine-test-results && zip -q -r ../engine-test-results.zip .)
@@ -101,8 +108,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.${{ github.run_number }}
-          name: Majdi Cinematic AI v3.0.${{ github.run_number }}
+          tag_name: v4.0.${{ github.run_number }}
+          name: Majdi Cinematic AI Studio v4.0.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           body_path: verification.md
           files: |

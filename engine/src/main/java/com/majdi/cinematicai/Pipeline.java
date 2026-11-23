@@ -27,6 +27,7 @@ final class Pipeline {
     String isolation;
     String reason;
     float[] focusMask;
+    private int[] inputOfLast;   // working-resolution input of the final stage (for a fast preview)
 
     int halo() { return GradeCore.HALO * Math.max(1, stages.size()); }
 
@@ -81,6 +82,7 @@ final class Pipeline {
             usedPlans.put(k, plan);
             p.stages.add(plan);
             p.labels.add(l.filter);
+            p.inputOfLast = cur;
             if (plan.style.bokeh) { p.isolation = plan.isolation; if (plan.focusMask != null) p.focusMask = plan.focusMask; }
             if (plan.reason != null) p.reason = plan.reason;
             done++;
@@ -103,6 +105,7 @@ final class Pipeline {
             SceneStats stats = SceneStats.measure(cur, w, h);
             p.stages.add(RenderPlan.build(cur, w, h, o, tone, stats, maps, nf, luts));
             p.labels.add("adjust");
+            p.inputOfLast = cur;
         }
         return p;
     }
@@ -185,6 +188,12 @@ final class Pipeline {
         } finally {
             ex.shutdownNow();
         }
+    }
+
+    /** The working-resolution result of the build (only the final stage is rendered here). */
+    int[] renderPreview(int[] src, int w, int h) {
+        if (stages.isEmpty()) return src.clone();
+        return renderStage(stages.get(stages.size() - 1), inputOfLast, w, h);
     }
 
     /** Renders the whole chain at the image's own size (preview). With no stages, a copy. */

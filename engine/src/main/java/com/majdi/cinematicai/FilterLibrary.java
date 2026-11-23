@@ -17,7 +17,25 @@ final class FilterLibrary {
         }
     }
 
-    static final String[] CATEGORIES = {"سينمائي", "دراماتيكي", "احترافي", "طبيعي", "دمج", "مستوردة"};
+    static final String[] CATEGORIES = {"سينمائي", "دراماتيكي", "احترافي", "طبيعي", "دمج", "مستوردة", "شخصية"};
+
+    /** Default strength when a look is first applied. */
+    static float defaultStrength(String id) {
+        if (id.equals("fusion")) return 0.65f;
+        if (id.equals("noir") || id.startsWith("lut:")) return 1f;
+        return 0.8f;
+    }
+
+    /** Display name for any layer id (built-in, imported, or missing). */
+    static String displayName(String id, FilterStore store) {
+        Entry e = find(id);
+        if (e != null) return e.nameAr + " — " + e.name;
+        if (id.startsWith("lut:") && store != null) {
+            FilterStore.Item it = store.get(id.substring(4));
+            return it != null ? it.name + " (LUT)" : "LUT محذوف";
+        }
+        return id;
+    }
 
     static final List<Entry> BUILT_IN = new ArrayList<>();
     static {
@@ -32,6 +50,7 @@ final class FilterLibrary {
         BUILT_IN.add(new Entry("dslr", "DSLR", "احترافي DSLR", "احترافي"));
         BUILT_IN.add(new Entry("portrait", "Portrait Pro", "بورتريه احترافي", "احترافي"));
         BUILT_IN.add(new Entry("natural", "Natural Pro", "طبيعي احترافي", "طبيعي"));
+        BUILT_IN.add(new Entry("auto", "AI Auto", "تلقائي ذكي", "طبيعي"));
     }
 
     static Entry find(String id) {
