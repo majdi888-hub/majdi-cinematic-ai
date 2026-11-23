@@ -46,7 +46,7 @@ final class ObjectSelect {
                 float dj = d[j];
                 float dstep = Math.abs(dj - di), lstep = Math.abs(lum[j] - lum[i]);
                 // grow along continuous depth; across a visible image edge only if depth is flat there
-                boolean cont = dstep < step && (lstep < 0.09f || dstep < step * 0.25f);
+                boolean cont = dstep < step && (lstep < 0.15f || dstep < step * 0.5f);
                 if (Math.abs(dj - d0) < tolAbs && cont) {
                     in[j] = true;
                     queue[qt++] = j;
@@ -56,7 +56,12 @@ final class ObjectSelect {
         float[] m = new float[n];
         for (int i = 0; i < n; i++) m[i] = in[i] ? 1f : 0f;
         if (maps.hasSubject && maps.subjectAt(u, v) > 0.5f) {
-            for (int i = 0; i < n; i++) m[i] = Math.max(m[i], maps.subject[i]);
+            // the segmentation matte may hold several objects: take only what lies at the
+            // tapped object's distance (a lamp or fan elsewhere in the room is not merged)
+            for (int i = 0; i < n; i++) {
+                float near = 1f - ColorMath.smooth(tolAbs * 0.5f, tolAbs, Math.abs(d[i] - d0));
+                m[i] = Math.max(m[i], maps.subject[i] * near);
+            }
         }
         // soft, edge-following mask; grow/shrink by moving the threshold of a smoothed mask
         int lg = Math.max(w, h);

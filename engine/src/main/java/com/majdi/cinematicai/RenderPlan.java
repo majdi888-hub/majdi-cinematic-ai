@@ -76,6 +76,15 @@ final class RenderPlan {
         }
         if (st.bokeh) { st.focal = opt.focal; st.aperture = opt.aperture; }
 
+        // Portrait Pro is for people: without a detected face (and no focus chosen by the user)
+        // it applies a conservative portrait grade and no background isolation.
+        if ("portrait".equals(st.key) && faceCount == 0 && opt.focus == null) {
+            st.bokeh = false;
+            st.vig = Math.min(st.vig, 0.06f);
+            st.depthDodge = 0f;
+            reason = "Portrait Pro مخصص لصور الأشخاص — لم يُكتشف وجه، فطُبّقت معالجة محافظة دون عزل";
+        }
+
         // ---- lens isolation gate: real depth AND a trusted focus (tap, reliable subject or face)
         String iso = "off";
         boolean useSubject = false;
@@ -98,6 +107,13 @@ final class RenderPlan {
                 focus = maps.depthAt(opt.focus[0], opt.focus[1]);
                 useSubject = maps.hasSubject && maps.subjectAt(opt.focus[0], opt.focus[1]) > 0.5f;
                 iso = "on";
+            } else if ("portrait".equals(st.key) && faceCount > 0 && tone.faces.length > 0) {
+                // portrait: focus on the face; the person matte is used only if it covers the face
+                float[] f = tone.faces[0];
+                float fu = (f[0] + f[2]) / 2f, fv = (f[1] + f[3]) / 2f;
+                focus = maps.depthAt(fu, fv);
+                useSubject = maps.hasSubject && maps.subjectAt(fu, fv) > 0.5f;
+                iso = "on";
             } else if (maps.subjectReliable()) {
                 focus = maps.focus;
                 useSubject = true;
@@ -119,7 +135,9 @@ final class RenderPlan {
         RenderPlan plan = new RenderPlan(st, opt.strength, tone, stats, maps, lut, reason, iso);
         plan.ww = w;
         plan.wh = h;
-        boolean lens = iso.equals("on") && opt.strength > 0.01f && st.blurAmt > 0.01f;
+        // isolation amount is its own control (Lens panel), independent of the look's strength
+        float isoAmt = Math.max(0f, Math.min(1f, opt.depthBlur)) * st.blurAmt;
+        boolean lens = iso.equals("on") && opt.strength > 0.01f && isoAmt > 0.01f;
         if (lens || st.halation > 0f) {
             GradeCore core = new GradeCore(plan, w, h, 1);
             float[][] g = core.gradeLinear(px);
@@ -132,11 +150,28 @@ final class RenderPlan {
             // depth of field widens with smaller apertures and shorter lenses
             float lensK = st.focal <= 35 ? 0.55f : (st.focal >= 85 ? 1.7f : 1.0f);
             float apK = 1.8f / Math.max(1.8f, st.aperture);
-            float radius = Math.max(w, h) * 0.020f * lensK * apK * st.blurAmt * opt.strength;
-            float dof = 0.025f * (st.aperture / 1.8f) * (float) Math.sqrt(50.0 / st.focal);
-            dof *= (float) Math.pow(8.0, Math.max(-1f, Math.min(1f, opt.focusRange)));   // user: narrow .. wide
+            float radius = Math.max(w, h) * 0.020f * lensK * apK * isoAmt;
+            // depth of field around the focal plane (in normalized inverse depth): wide enough to
+            // absorb depth-network noise, widened by smaller apertures and shorter lenses
+            float dof = 0.085f * (st.aperture / 1.8f) * (float) Math.sqrt(50.0 / st.focal);
             float[] subj = objectMask != null ? objectMask : (useSubject ? maps.subject : new float[n]);
-            plan.bokeh = Bokeh.render(plan.gR, plan.gG, plan.gB, maps.depth, subj, w, h, focus, radius, dof);
+            if (objectMask != null || useSubject) {
+                // the whole focused object stays inside the depth of field (front to back)
+                float[] v = new float[n];
+                int c = 0;
+                for (int i = 0; i < n; i++) if (subj[i] > 0.6f) v[c++] = maps.depth[i];
+                if (c > 20) {
+                    java.util.Arrays.sort(v, 0, c);
+                    float half = 0.5f * (v[(int) (c * 0.9f)] - v[(int) (c * 0.1f)]);
+                    // capped: a selection that leaked into the floor or a wall must not put the
+                    // whole room inside the depth of field
+                    half = Math.min(half, 0.12f);
+                    focus = 0.5f * (v[(int) (c * 0.9f)] + v[(int) (c * 0.1f)]);
+                    dof = Math.max(dof, half + 0.03f);
+                }
+            }
+            dof *= (float) Math.pow(4.0, Math.max(-1f, Math.min(1f, opt.focusRange)));   // user: narrow .. wide
+            plan.bokeh = Bokeh.render(plan.gR, plan.gG, plan.gB, maps.depth, subj, lum, w, h, focus, radius, dof);
             float[][] ab = Guided.guidedCoeffs(lum, plan.bokeh.sharp, w, h, 2, 1e-4f);
             plan.sA = ab[0];
             plan.sB = ab[1];

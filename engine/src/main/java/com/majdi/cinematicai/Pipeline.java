@@ -54,7 +54,7 @@ final class Pipeline {
         if (cache != null && cache.source != px) cache.reset(px);
         StringBuilder key = new StringBuilder();
         java.util.Map<String, Object> lens = st.toMap();
-        key.append(Json.write(lens.get("lens")));
+        key.append(Json.write(lens.get("lens"))).append(Json.write(lens.get("film")));
         java.util.Map<String, RenderPlan> usedPlans = new java.util.HashMap<>();
         java.util.Map<String, int[]> usedOuts = new java.util.HashMap<>();
         int[] cur = px;

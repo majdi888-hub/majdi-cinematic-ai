@@ -35,18 +35,41 @@ final class Bokeh {
      */
     static Bokeh render(float[] lr, float[] lg, float[] lb, float[] depth, float[] subject,
                         int w, int h, float focus, float maxRadius, float depthOfField) {
+        return render(lr, lg, lb, depth, subject, null, w, h, focus, maxRadius, depthOfField);
+    }
+
+    /**
+     * Circle of confusion from the depth map and the focal plane only:
+     *  - everything within the depth of field around the focal plane stays fully sharp
+     *    (objects next to the focused one at a similar distance are never blurred);
+     *  - beyond it the blur grows smoothly (smoothstep), so planes such as floors and walls
+     *    go out of focus gradually instead of in steps;
+     *  - the magnitude is then smoothed edge-aware with the photo as guide, which removes
+     *    depth-network noise inside surfaces while keeping object boundaries crisp.
+     * @param guide display luma 0..1 for the edge-aware refinement (may be null)
+     */
+    static Bokeh render(float[] lr, float[] lg, float[] lb, float[] depth, float[] subject, float[] guide,
+                        int w, int h, float focus, float maxRadius, float depthOfField) {
         int n = w * h;
         final int L = 6;                      // blur layers on each side of the focal plane
-        float[] coc = new float[n];           // signed, in layer units: +background, -foreground
+        final float ramp = 0.35f;             // depth distance over which blur reaches its maximum
+        float[] mag = new float[n], sgn = new float[n];
         for (int i = 0; i < n; i++) {
             float dd = focus - depth[i];      // >0: farther than focus
-            float a = Math.abs(dd);
-            a = Math.max(0f, a - depthOfField) / Math.max(1e-3f, 0.55f - depthOfField);  // dead zone = depth of field
-            if (a > 1f) a = 1f;
-            float c = a * L * Math.signum(dd);
-            c *= (1f - subject[i]);           // the subject is always in focus
-            coc[i] = c;
+            mag[i] = ColorMath.smooth(depthOfField, depthOfField + ramp, Math.abs(dd));
+            sgn[i] = dd >= 0f ? 1f : -1f;
         }
+        if (guide != null) {
+            float[] g = Guided.guidedFilter(guide, mag, w, h, Math.max(2, Math.max(w, h) / 260), 1e-3f);
+            for (int i = 0; i < n; i++) {
+                // only allow the refinement to reduce blur near the plateau edge, never to
+                // spread blur into the in-focus zone
+                float v = Math.max(0f, Math.min(1f, g[i]));
+                mag[i] = mag[i] < 0.02f ? 0f : v;
+            }
+        }
+        float[] coc = new float[n];           // signed, in layer units: +background, -foreground
+        for (int i = 0; i < n; i++) coc[i] = mag[i] * L * sgn[i] * (1f - subject[i]);   // the focused object is always sharp
 
         // highlight expansion (clipped JPEG highlights carry more energy than their code value)
         float[] er = new float[n], eg = new float[n], eb = new float[n];

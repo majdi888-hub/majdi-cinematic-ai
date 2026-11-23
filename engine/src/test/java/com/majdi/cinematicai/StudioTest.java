@@ -405,4 +405,121 @@ public class StudioTest {
         assertTrue(tone < 2.0);
         log("PASS parallel export == serial render, rows in order, preview matches export");
     }
+
+    // ------------------------------------------------------------ looks: DSLR lens, Portrait, Film
+
+    /** Synthetic scene depth: far wall (0.15) with a near box (0.85) and a second object just behind it (0.75). */
+    static SceneMaps syntheticMaps(int[] img, int sw, int sh, boolean flipV) {
+        float[] lum = new float[sw * sh];
+        float[] d = new float[sw * sh];
+        for (int y = 0; y < sh; y++) for (int x = 0; x < sw; x++) {
+            int yy = flipV ? sh - 1 - y : y;
+            float v = 0.15f;
+            if (x > sw * 0.30f && x < sw * 0.55f && yy > sh * 0.40f && yy < sh * 0.80f) v = 0.85f;      // focused object
+            else if (x > sw * 0.58f && x < sw * 0.75f && yy > sh * 0.45f && yy < sh * 0.80f) v = 0.78f; // neighbour near the focal plane
+            d[y * sw + x] = v;
+            int c = img[y * sw + x];
+            lum[y * sw + x] = (0.299f * (c >> 16 & 255) + 0.587f * (c >> 8 & 255) + 0.114f * (c & 255)) / 255f;
+        }
+        return SceneMaps.build(lum, sw, sh, d, sw, sh, null, 0, 0, new float[0][]);
+    }
+
+    static int[] flipV(int[] a, int sw, int sh) {
+        int[] o = new int[a.length];
+        for (int y = 0; y < sh; y++) System.arraycopy(a, (sh - 1 - y) * sw, o, y * sw, sw);
+        return o;
+    }
+
+    static double hfRatio(int[] out, int[] ref, int sw, int x0, int y0, int x1, int y1) {
+        double so = 0, sr = 0;
+        for (int y = y0; y < y1; y++) for (int x = x0 + 1; x < x1; x++) {
+            int i = y * sw + x;
+            so += Math.abs((out[i] >> 8 & 255) - (out[i - 1] >> 8 & 255));
+            sr += Math.abs((ref[i] >> 8 & 255) - (ref[i - 1] >> 8 & 255));
+        }
+        return so / Math.max(1, sr);
+    }
+
+    @Test
+    public void dslrLensFollowsDepthOnly() throws Exception {
+        SceneMaps m = syntheticMaps(px, w, h, false);
+        EditState st = new EditState();
+        st.layers.add(new EditState.Layer("dslr", 0.8f));
+        st.focus = new float[]{0.42f, 0.60f};
+        st.focusMode = "point";
+        int[] out = Pipeline.build(px, w, h, st, m, null, EngineTest::lut, null).render(px, w, h);
+        Pipeline p = Pipeline.build(px, w, h, st, m, null, EngineTest::lut, null);
+        assertEquals("on", p.isolation);
+        double obj = hfRatio(out, px, w, (int) (w * 0.33), (int) (h * 0.45), (int) (w * 0.52), (int) (h * 0.75));
+        double neighbour = hfRatio(out, px, w, (int) (w * 0.61), (int) (h * 0.50), (int) (w * 0.72), (int) (h * 0.75));
+        double far = hfRatio(out, px, w, (int) (w * 0.02), (int) (h * 0.05), (int) (w * 0.25), (int) (h * 0.30));
+        log(String.format(Locale.ROOT, "  DSLR detail kept: focused object x%.2f, neighbour near the focal plane x%.2f, far wall x%.2f", obj, neighbour, far));
+        assertTrue(obj > 0.85);
+        assertTrue("element near the focal plane must stay sharp", neighbour > 0.85);
+        assertTrue(far < obj - 0.2);
+        // isolation amount is independent of the look's strength, and controlled by the Lens amount
+        EditState weak = st.copy(); weak.layers.get(0).strength = 0.3f;
+        Pipeline pw0 = Pipeline.build(px, w, h, weak, m, null, EngineTest::lut, null);
+        assertArrayEquals(p.focusMask, pw0.focusMask, 1e-6f);
+        double farWeak = hfRatio(pw0.render(px, w, h), px, w, (int) (w * 0.02), (int) (h * 0.05), (int) (w * 0.25), (int) (h * 0.30));
+        assertTrue(Math.abs(farWeak - far) < 0.15);
+        EditState more = st.copy(); more.depthBlur = 1.0f;
+        double farMore = hfRatio(Pipeline.build(px, w, h, more, m, null, EngineTest::lut, null).render(px, w, h), px, w,
+                (int) (w * 0.02), (int) (h * 0.05), (int) (w * 0.25), (int) (h * 0.30));
+        log(String.format(Locale.ROOT, "  far wall detail: Lens amount 50%% x%.2f, 100%% x%.2f, look strength 30%% x%.2f", far, farMore, farWeak));
+        assertTrue(farMore < far - 0.04);
+        // no position prior: flipping the scene flips the result
+        int[] fpx = flipV(px, w, h);
+        EditState fs = st.copy(); fs.focus = new float[]{0.42f, 0.40f};
+        Pipeline pf = Pipeline.build(fpx, w, h, fs, syntheticMaps(fpx, w, h, true), null, EngineTest::lut, null);
+        float maxd = 0f;
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            maxd = Math.max(maxd, Math.abs(p.focusMask[y * w + x] - pf.focusMask[(h - 1 - y) * w + x]));
+        log(String.format(Locale.ROOT, "  flipped scene: max difference of the sharp map %.3f", maxd));
+        assertTrue(maxd < 0.08f);
+        save(out, w, h, "dslr_synthetic_depth");
+        log("PASS DSLR: blur from depth + focus only; near-focal elements sharp; amount independent of strength; position-free");
+    }
+
+    @Test
+    public void portraitWithoutPersonIsConservative() throws Exception {
+        SceneMaps m = syntheticMaps(px, w, h, false);
+        EditState st = new EditState();
+        st.layers.add(new EditState.Layer("portrait", 0.8f));
+        Pipeline p = Pipeline.build(px, w, h, st, m, new float[0][], EngineTest::lut, null);
+        assertNull(p.focusMask);
+        assertNotNull(p.reason);
+        assertTrue(p.reason.contains("Portrait Pro"));
+        Pipeline pf = Pipeline.build(px, w, h, st, m, new float[][]{{0.35f, 0.42f, 0.52f, 0.70f}}, EngineTest::lut, null);
+        assertEquals("on", pf.isolation);
+        log("PASS Portrait Pro: no face -> conservative, no isolation, explained; with a face -> isolation on the face");
+    }
+
+    @Test
+    public void filmLookControls() throws Exception {
+        EditState base = new EditState();
+        base.layers.add(new EditState.Layer("cinematic:film", 1f));
+        int[] r0 = run(base);
+        EditState g = base.copy(); g.filmGrain = 100;
+        EditState f = base.copy(); f.filmFade = 100;
+        EditState c = base.copy(); c.filmColorFade = 100;
+        EditState k = base.copy(); k.filmContrast = 100;
+        int[] rg = run(g), rf = run(f), rc = run(c), rk = run(k);
+        double minDark0 = 255, minDarkF = 255;
+        int[] h0 = new int[256], hf = new int[256];
+        for (int i = 0; i < r0.length; i++) { h0[(int) Math.round(0.299 * (r0[i] >> 16 & 255) + 0.587 * (r0[i] >> 8 & 255) + 0.114 * (r0[i] & 255))]++;
+            hf[(int) Math.round(0.299 * (rf[i] >> 16 & 255) + 0.587 * (rf[i] >> 8 & 255) + 0.114 * (rf[i] & 255))]++; }
+        int acc = 0; for (int i = 0; i < 256; i++) { acc += h0[i]; if (acc > r0.length / 100) { minDark0 = i; break; } }
+        acc = 0; for (int i = 0; i < 256; i++) { acc += hf[i]; if (acc > rf.length / 100) { minDarkF = i; break; } }
+        log(String.format(Locale.ROOT, "  Film: grain hf %.2f->%.2f | black point (1%%) %.0f->%.0f | sat %.1f->%.1f | contrast sd %.1f->%.1f",
+                hfRatio(r0, px, w, 0, 0, w, h), hfRatio(rg, px, w, 0, 0, w, h), minDark0, minDarkF, sat(r0), sat(rc), sd(r0), sd(rk)));
+        assertTrue(hfRatio(rg, px, w, 0, 0, w, h) > hfRatio(r0, px, w, 0, 0, w, h) + 0.05);
+        assertTrue(minDarkF > minDark0 + 2);
+        assertTrue(sat(rc) < sat(r0) - 1);
+        assertTrue(sd(rk) > sd(r0) + 1);
+        assertTrue(sat(r0) > sat(px) * 0.8);   // default keeps colour depth
+        EditState j = base.copy(); j.filmGrain = 70; j.filmContrast = -20;
+        assertEquals(j.toJson(), EditState.fromJson(j.toJson()).toJson());
+        log("PASS Film Look: grain, faded blacks, colour fade and film contrast each act independently; balanced default keeps colour");
+    }
 }

@@ -79,14 +79,17 @@ final class FilterLibrary {
             o.style = "custom";
             o.custom = s;
             o.lutOverride = importedLut;
+        } else if (id.equals("cinematic:film")) {
+            Style s = Style.of("cinematic", "film");
+            Style.film(s, st.filmGrain, st.filmFade, st.filmColorFade, st.filmContrast);
+            o.style = "custom";
+            o.custom = s;
         } else if (id.startsWith("cinematic:")) {
             o.style = "cinematic";
             o.preset = id.substring("cinematic:".length());
         } else if (id.equals("portrait") || id.equals("noir")) {
             o.style = "custom";
-            Style s = Style.of(id);
-            if (s.bokeh) { s.blurAmt = 0.6f * Math.max(0.2f, st.depthBlur * 2f); }
-            o.custom = s;
+            o.custom = Style.of(id);
         } else {
             o.style = id;   // fusion, dramatic, dslr, natural, auto
         }

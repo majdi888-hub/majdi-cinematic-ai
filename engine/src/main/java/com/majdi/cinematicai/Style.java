@@ -83,7 +83,7 @@ final class Style {
                 p.depthDodge = 0.18f;
                 p.lut = "natural_cinematic"; p.lutAmt = 0.6f;
                 p.skinRefine = 0.5f; p.grain = 0.004f;
-                p.bokeh = true; p.focal = 85; p.aperture = 2.8f; p.blurAmt = 0.6f;
+                p.bokeh = true; p.focal = 85; p.aperture = 2.8f; p.blurAmt = 0.85f;
                 break;
             case "noir":
                 // Dramatic Noir: monochrome print, strong local contrast, deep but detailed blacks
@@ -125,22 +125,21 @@ final class Style {
                 p.halation = 0.2f; p.grain = 0.022f; p.skinRefine = 0.3f;
                 break;
             case "night":
-                p.wbAmt = 0.15f; p.temp = -0.25f; p.expo = 0.10f; p.nightKeep = 0.85f;
-                p.shadowLift = 0.30f; p.highComp = 0.58f; p.detail = 1.15f; p.midBoost = 1.30f;
-                p.contrast = 1.20f; p.shoulder = 0.60f; p.toe = 0.006f;
-                p.shadowGain = new float[]{0.92f, 0.99f, 1.12f};
-                p.highGain = new float[]{1.08f, 1.00f, 0.88f};
-                p.sat = 0.95f; p.vig = 0.22f; p.sharpen = 0.30f; p.nr = 1.2f;
-                p.lut = "night_cinema"; p.lutAmt = 1.0f;
-                p.halation = 0.8f; p.grain = 0.014f; p.skinRefine = 0.35f;
+                // night cinema: open, detailed shadows; lamps and windows recovered rather than
+                // clipped; restrained saturation and sharpening (no crunchy night noise)
+                p.wbAmt = 0.15f; p.temp = -0.22f; p.expo = 0.10f; p.nightKeep = 0.85f;
+                p.shadowLift = 0.44f; p.highComp = 0.62f; p.detail = 1.12f; p.midBoost = 1.22f;
+                p.contrast = 1.12f; p.shoulder = 0.58f; p.toe = 0.0015f;
+                p.shadowGain = new float[]{0.94f, 0.99f, 1.09f};
+                p.highGain = new float[]{1.06f, 1.00f, 0.91f};
+                p.sat = 0.90f; p.vib = 0f; p.vig = 0.18f; p.sharpen = 0.16f; p.nr = 1.3f;
+                p.lut = "night_cinema"; p.lutAmt = 0.8f;
+                p.halation = 0.5f; p.grain = 0.010f; p.skinRefine = 0.35f; p.chromaLimit = 0.82f;
                 break;
             case "film":
                 p.wbAmt = 0.2f; p.temp = 0.15f; p.expo = 0.15f;
                 p.shadowLift = 0.30f; p.highComp = 0.38f; p.detail = 1.05f; p.midBoost = 1.12f;
-                p.contrast = 1.10f; p.shoulder = 0.70f; p.blackLift = 0.018f;
-                p.sat = 0.92f; p.vig = 0.12f; p.sharpen = 0.15f;
-                p.lut = "film_look"; p.lutAmt = 1.0f;
-                p.halation = 0.35f; p.grain = 0.035f; p.skinRefine = 0.35f;
+                film(p, 30f, 30f, 25f, 0f);
                 break;
             case "natural_cinematic":
                 p.wbAmt = 0.4f; p.expo = 0.20f;
@@ -165,6 +164,30 @@ final class Style {
                 p.halation = 0.5f; p.grain = 0.018f; p.skinRefine = 0.35f;
                 break;
         }
+    }
+
+    /**
+     * Film Look with its four controls (0..100, contrast -100..100). Defaults (30, 30, 25, 0)
+     * give a balanced print: gentle fade, fine grain, colour depth kept by the film LUT.
+     *  grain      -> film grain amplitude
+     *  fadeBlacks -> lifted, milky black point (toe)
+     *  colorFade  -> reduced saturation / LUT density, as in an aged print
+     *  contrast   -> film curve contrast
+     */
+    static void film(Style p, float grain, float fadeBlacks, float colorFade, float contrast) {
+        p.wbAmt = 0.2f; p.temp = 0.12f; p.expo = 0.15f;
+        p.shadowLift = 0.30f; p.highComp = 0.40f; p.detail = 1.05f; p.midBoost = 1.12f;
+        p.shoulder = 0.70f;
+        p.contrast = Math.max(0.85f, 1.10f * (1f + 0.25f * contrast / 100f));
+        p.blackLift = 0.040f * fadeBlacks / 100f;
+        p.toe = 0.004f * (1f - fadeBlacks / 100f);
+        float cf = colorFade / 100f;
+        p.sat = 1.0f - 0.32f * cf;
+        p.vib = 0.06f * (1f - cf);
+        p.lut = "film_look"; p.lutAmt = 0.95f - 0.25f * cf;
+        p.vig = 0.10f; p.sharpen = 0.15f;
+        p.halation = 0.25f; p.grain = 0.040f * grain / 100f; p.skinRefine = 0.35f;
+        p.chromaLimit = 0.9f;
     }
 
     /**
@@ -204,7 +227,7 @@ final class Style {
         p.sat = 0.95f;
         p.vib = 0.06f * dslr;
         p.bokeh = blur > 0.01f;
-        p.blurAmt = blur;
+        p.blurAmt = 1f;          // the amount itself comes from the Lens panel (depthBlur)
         p.focal = 50; p.aperture = 2.8f;
         // final balancing: cap the combined global + local contrast and the chroma
         float total = (p.contrast - 1f) + 0.5f * (p.midBoost - 1f);

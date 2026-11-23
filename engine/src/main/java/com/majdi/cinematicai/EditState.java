@@ -57,6 +57,12 @@ final class EditState {
     float depthBlur = 0.5f;
     // Fusion Pro sub-strengths
     float fusionCinematic = 0.8f, fusionDramatic = 0.6f, fusionDslr = 0.7f;
+    // Film Look controls (used by Film Look layers): 0..100, contrast -100..100
+    float filmGrain = 30f, filmFade = 30f, filmColorFade = 25f, filmContrast = 0f;
+
+    boolean filmDefaults() {
+        return filmGrain == 30f && filmFade == 30f && filmColorFade == 25f && filmContrast == 0f;
+    }
 
     EditState() {
         for (String k : ADJUST_KEYS) adjust.put(k, 0f);
@@ -124,6 +130,9 @@ final class EditState {
         lens.put("focal", focal); lens.put("aperture", aperture); lens.put("depthBlur", depthBlur);
         lens.put("fusionCinematic", fusionCinematic); lens.put("fusionDramatic", fusionDramatic); lens.put("fusionDslr", fusionDslr);
         m.put("lens", lens);
+        Map<String, Object> film = new LinkedHashMap<>();
+        film.put("grain", filmGrain); film.put("fadeBlacks", filmFade); film.put("colorFade", filmColorFade); film.put("contrast", filmContrast);
+        m.put("film", film);
         return m;
     }
 
@@ -206,6 +215,13 @@ final class EditState {
             s.fusionCinematic = Json.num(l, "fusionCinematic", 0.8f, 0f, 1f);
             s.fusionDramatic = Json.num(l, "fusionDramatic", 0.6f, 0f, 1f);
             s.fusionDslr = Json.num(l, "fusionDslr", 0.7f, 0f, 1f);
+        }
+        if (m.get("film") != null) {
+            Map<String, Object> f = Json.obj(m.get("film"));
+            s.filmGrain = Json.num(f, "grain", 30f, 0f, 100f);
+            s.filmFade = Json.num(f, "fadeBlacks", 30f, 0f, 100f);
+            s.filmColorFade = Json.num(f, "colorFade", 25f, 0f, 100f);
+            s.filmContrast = Json.num(f, "contrast", 0f, -100f, 100f);
         }
         return s;
     }

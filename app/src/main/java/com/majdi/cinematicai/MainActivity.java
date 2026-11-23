@@ -72,7 +72,7 @@ public class MainActivity extends Activity {
 
     private static final int REQ_PICK = 11, REQ_IMPORT = 12, REQ_TREE = 13;
     private static final int PREVIEW_MAX = 1600;
-    private static final int THUMB_MAX = 220;
+    private static final int THUMB_MAX = 300;
 
     static final int BG = Color.rgb(11, 12, 15);
     static final int PANEL = Color.argb(240, 20, 21, 27);
@@ -105,6 +105,9 @@ public class MainActivity extends Activity {
     private final Map<String, Button> toolButtons = new HashMap<>();
     private String tool;                 // open panel, or null
     private boolean uiHidden;
+    private View handle;
+    private int panelState = 1;          // 0 closed, 1 medium, 2 expanded
+    private int panelH;                  // current panel height in px (follows the drag)
 
     // ---- image + edit
     private Uri sourceUri;
@@ -142,6 +145,8 @@ public class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService thumbWorker = Executors.newSingleThreadExecutor();
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService viewWorker = Executors.newSingleThreadExecutor();
+    private int viewToken;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private Runnable pendingRender;
 
@@ -302,13 +307,14 @@ public class MainActivity extends Activity {
         // ---- top bar
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.VERTICAL);
-        top.setBackgroundColor(Color.argb(200, 11, 12, 15));
+        top.setBackgroundColor(Color.argb(215, 11, 12, 15));
         topBar = hrow();
-        topBar.setPadding(dp(6), dp(30), dp(6), dp(2));
-        TextView title = text("Majdi Studio", 15, ACCENT);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(dp(8), 0, dp(8), 0);
-        topBar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        topBar.setPadding(dp(4), statusBarHeight(), dp(4), 0);
+        status = text("Majdi Studio", 11.5f, TEXT2);
+        status.setPadding(dp(8), 0, dp(4), 0);
+        status.setMaxLines(2);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        topBar.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         busy = new ProgressBar(this);
         busy.setIndeterminate(true);
         busy.setVisibility(View.INVISIBLE);
@@ -323,19 +329,14 @@ public class MainActivity extends Activity {
             return true;
         });
         Button full = iconButton("⛶", "إخفاء الأدوات / ملء الشاشة", v -> setUiHidden(true));
-        Button open = iconButton("＋", "فتح صورة", v -> pickImage());
+        Button save = iconButton("⇪", "حفظ بالدقة الأصلية (اضغط مطولًا لإعدادات التصدير)", v -> { if (previewPx != null) startExport(false); });
+        save.setOnLongClickListener(v -> { openTool("export"); return true; });
         topBar.addView(undoBtn);
         topBar.addView(redoBtn);
         topBar.addView(compare);
+        topBar.addView(save);
         topBar.addView(full);
-        topBar.addView(open);
         top.addView(topBar);
-        status = text("", 11.5f, TEXT2);
-        status.setPadding(dp(12), 0, dp(12), dp(6));
-        status.setSingleLine(false);
-        status.setMaxLines(2);
-        status.setEllipsize(TextUtils.TruncateAt.END);
-        top.addView(status);
         exportBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         exportBar.setMax(100);
         exportBar.setVisibility(View.GONE);
@@ -349,7 +350,7 @@ public class MainActivity extends Activity {
         panelScroll.setBackground(rounded(PANEL, 18));
         LinearLayout pwrap = new LinearLayout(this);
         pwrap.setOrientation(LinearLayout.VERTICAL);
-        pwrap.setPadding(dp(10), dp(4), dp(10), dp(10));
+        pwrap.setPadding(dp(10), 0, dp(10), dp(10));
         LinearLayout ph0 = hrow();
         panelTitle = text("", 14, Color.WHITE);
         panelTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -362,23 +363,58 @@ public class MainActivity extends Activity {
         pwrap.addView(panel);
         panelScroll.addView(pwrap);
         panelScroll.setVisibility(View.GONE);
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        plp.setMargins(dp(6), 0, dp(6), dp(4));
+        // drag handle: drag to resize; release snaps to closed / medium / expanded; tap toggles
+        FrameLayout hwrap = new FrameLayout(this);
+        handle = hwrap;
+        View bar = new View(this);
+        bar.setBackground(rounded(Color.rgb(120, 122, 132), 3));
+        hwrap.addView(bar, new FrameLayout.LayoutParams(dp(44), dp(5), Gravity.CENTER));
+        hwrap.setBackground(rounded(PANEL, 18));
+        hwrap.setContentDescription("اسحب لتغيير حجم اللوحة");
+        hwrap.setVisibility(View.GONE);
+        hwrap.setOnTouchListener(new View.OnTouchListener() {
+            float downY; int startH; boolean moved;
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN: downY = e.getRawY(); startH = panelH; moved = false; return true;
+                    case MotionEvent.ACTION_MOVE: {
+                        float dy = downY - e.getRawY();
+                        if (Math.abs(dy) > dp(6)) moved = true;
+                        if (moved) setPanelHeight((int) Math.max(0, Math.min(root.getHeight() * 0.68f, startH + dy)));
+                        return true;
+                    }
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        if (!moved) { snapPanel(panelState == 2 ? 1 : 2); v.performClick(); return true; }
+                        float f = panelH / (float) root.getHeight();
+                        snapPanel(f < 0.14f ? 0 : (f < 0.47f ? 1 : 2));
+                        return true;
+                }
+                return false;
+            }
+        });
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22));
+        hlp.setMargins(dp(6), 0, dp(6), 0);
+        bottomArea.addView(hwrap, hlp);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0);
+        plp.setMargins(dp(6), 0, dp(6), dp(2));
         bottomArea.addView(panelScroll, plp);
 
         LinearLayout tb = hrow();
-        tb.setPadding(dp(4), dp(4), dp(4), dp(10));
+        tb.setPadding(dp(2), dp(2), dp(2), dp(4));
         for (String[] t : TOOLS) {
             final String key = t[0];
             Button b = new Button(this);
             b.setText(t[1] + "\n" + t[2]);
             b.setAllCaps(false);
-            b.setTextSize(11);
+            b.setTextSize(10.5f);
             b.setTextColor(Color.WHITE);
             b.setBackground(rounded(Color.TRANSPARENT, 12));
             b.setStateListAnimator(null);
-            b.setMinWidth(dp(70));
-            b.setMinimumWidth(dp(70));
+            b.setMinWidth(dp(64));
+            b.setMinimumWidth(dp(64));
+            b.setMinHeight(dp(50));
+            b.setMinimumHeight(dp(50));
             b.setPadding(dp(4), dp(2), dp(4), dp(2));
             b.setOnClickListener(v -> openTool(key.equals(tool) ? null : key));
             toolButtons.put(key, b);
@@ -413,6 +449,26 @@ public class MainActivity extends Activity {
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> ui.post(this::layoutPhoto));
         setContentView(root);
         refreshChrome();
+    }
+
+    private int statusBarHeight() {
+        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : dp(24);
+    }
+
+    private void setPanelHeight(int h) {
+        panelH = h;
+        panelScroll.getLayoutParams().height = h;
+        panelScroll.setVisibility(h > 0 ? View.VISIBLE : View.INVISIBLE);
+        panelScroll.requestLayout();
+        ui.post(this::layoutPhoto);
+    }
+
+    /** 0 closed (tool bar only), 1 medium (photo stays large), 2 expanded. */
+    private void snapPanel(int st) {
+        if (st == 0) { openTool(null); return; }
+        panelState = st;
+        setPanelHeight((int) (root.getHeight() * (st == 1 ? 0.30f : 0.60f)));
     }
 
     private Button iconButton(String icon, String desc, View.OnClickListener l) {
@@ -492,12 +548,12 @@ public class MainActivity extends Activity {
     private void openTool(String t) {
         String old = tool;
         tool = t;
-        panelScroll.setVisibility(t == null ? View.GONE : View.VISIBLE);
-        if (t != null) {
-            // fixed panel height: the photo keeps most of the screen and does not jump while editing
-            float frac = "filters".equals(t) || "crop".equals(t) || "frame".equals(t) ? 0.33f : 0.40f;
-            panelScroll.getLayoutParams().height = (int) (root.getHeight() * frac);
-            panelScroll.requestLayout();
+        handle.setVisibility(t == null ? View.GONE : View.VISIBLE);
+        if (t == null) {
+            panelScroll.setVisibility(View.GONE);
+            panelH = 0;
+        } else if (old == null) {
+            snapPanel(panelState == 2 ? 2 : 1);
         }
         buildPanel();
         refreshChrome();
@@ -566,8 +622,8 @@ public class MainActivity extends Activity {
         panel.addView(hscroll(cats));
 
         LinearLayout mode = hrow();
-        mode.addView(chip("استبدال الطبقة المحددة", !addMode, () -> { addMode = false; buildPanel(); }));
-        mode.addView(chip("+ إضافة كطبقة جديدة", addMode, () -> { addMode = true; buildPanel(); }));
+        mode.addView(chip("استبدال الطبقة المحددة", !addMode, () -> { addMode = false; buildPanel(); invalidateThumbs(); }));
+        mode.addView(chip("+ إضافة كطبقة جديدة", addMode, () -> { addMode = true; buildPanel(); invalidateThumbs(); }));
         panel.addView(hscroll(mode));
 
         LinearLayout grid = hrow();
@@ -606,8 +662,28 @@ public class MainActivity extends Activity {
             panel.addView(note("الطبقة المحددة: " + FilterLibrary.displayName(l.filter, filters)));
             slider(panel, "قوة الفلتر", 0, 100, Math.round(l.strength * 100), Math.round(FilterLibrary.defaultStrength(l.filter) * 100), "٪",
                     (v, done) -> { l.strength = v / 100f; if (done) commit(true); else renderSoon(); });
+            layerExtras(panel, l);
         } else {
             panel.addView(note("لا توجد طبقات — اختر فلترًا لإضافته."));
+        }
+    }
+
+    /** Controls that belong to one specific look, shown under its strength. */
+    private void layerExtras(LinearLayout parent, EditState.Layer l) {
+        if (l.filter.equals("cinematic:film")) {
+            parent.addView(section("مظهر الفيلم"));
+            slider(parent, "حبيبات الفيلم", 0, 100, Math.round(state.filmGrain), 30, "",
+                    (v, d) -> { state.filmGrain = v; if (d) commit(true); else renderSoon(); });
+            slider(parent, "تبهيت الأسود", 0, 100, Math.round(state.filmFade), 30, "",
+                    (v, d) -> { state.filmFade = v; if (d) commit(true); else renderSoon(); });
+            slider(parent, "تبهيت الألوان", 0, 100, Math.round(state.filmColorFade), 25, "",
+                    (v, d) -> { state.filmColorFade = v; if (d) commit(true); else renderSoon(); });
+            slider(parent, "تباين الفيلم", -100, 100, Math.round(state.filmContrast), 0, "",
+                    (v, d) -> { state.filmContrast = v; if (d) commit(true); else renderSoon(); });
+        } else if (l.filter.equals("portrait") && faces.length == 0 && state.focus == null) {
+            parent.addView(note("Portrait Pro مخصص لصور الأشخاص. لم يُكتشف وجه في هذه الصورة، لذلك تُطبَّق معالجة محافظة دون عزل للخلفية."));
+        } else if (l.filter.equals("dslr") || l.filter.equals("portrait") || l.filter.equals("fusion")) {
+            parent.addView(note("مقدار عزل الخلفية مستقل عن قوة الفلتر: اضبطه من أداة «العدسة»."));
         }
     }
 
@@ -650,7 +726,11 @@ public class MainActivity extends Activity {
         buildPanel();
     }
 
-    /** Small renders of every visible filter on the current photo (real engine output). */
+    /**
+     * Previews of every visible filter on the current photo, rendered by the real engine in the
+     * real context: the current stack with the selected layer replaced by that filter (at the
+     * strength it would get), the Adjust panel, the lens settings and the depth maps.
+     */
     private void makeThumbs() {
         if (previewPx == null || !"filters".equals(tool)) return;
         final int token = ++thumbToken;
@@ -658,25 +738,37 @@ public class MainActivity extends Activity {
         final int[] src = previewPx;
         final int sw = pw, sh = ph;
         final EditState base = state.copy();
+        final int sel = state.layers.isEmpty() ? -1 : Math.max(0, Math.min(state.layers.size() - 1, selLayer));
+        final boolean add = addMode;
+        final SceneMaps sm = maps;
+        final float[][] fa = faces;
         thumbWorker.execute(() -> {
             float sc = THUMB_MAX / (float) Math.max(sw, sh);
             int tw = Math.max(8, Math.round(sw * sc)), th = Math.max(8, Math.round(sh * sc));
-            Bitmap small;
+            int[] spx;
+            SceneMaps tm;
             try {
                 Bitmap b = Bitmap.createBitmap(src, sw, sh, Bitmap.Config.ARGB_8888);
-                small = Bitmap.createScaledBitmap(b, tw, th, true);
+                Bitmap small = Bitmap.createScaledBitmap(b, tw, th, true);
                 b.recycle();
+                spx = ImageEngine.pixels(small);
+                tm = sm != null ? sm.resized(tw, th) : null;
             } catch (Throwable e) { return; }
-            int[] spx = ImageEngine.pixels(small);
             for (FilterCard c : cards) {
                 if (token != thumbToken) return;
                 if (c.preset || thumbs.containsKey(c.id)) continue;
                 try {
-                    EditState s = new EditState();
-                    s.layers.add(new EditState.Layer(c.id, FilterLibrary.defaultStrength(c.id)));
-                    s.fusionCinematic = base.fusionCinematic; s.fusionDramatic = base.fusionDramatic; s.fusionDslr = base.fusionDslr;
-                    s.depthBlur = 0f;
-                    Pipeline p = Pipeline.build(spx, tw, th, s, null, null, this::lut, this::importedLut);
+                    EditState s = base.copy();
+                    if (sel < 0 || add) {
+                        s.layers.add(new EditState.Layer(c.id, FilterLibrary.defaultStrength(c.id)));
+                    } else {
+                        EditState.Layer l = s.layers.get(sel);
+                        float strength = l.filter.equals(c.id) ? l.strength : FilterLibrary.defaultStrength(c.id);
+                        l.filter = c.id;
+                        l.strength = strength;
+                        l.enabled = true;
+                    }
+                    Pipeline p = Pipeline.build(spx, tw, th, s, tm, fa, this::lut, this::importedLut);
                     int[] out = p.render(spx, tw, th);
                     Bitmap tb = Bitmap.createBitmap(out, tw, th, Bitmap.Config.ARGB_8888);
                     ui.post(() -> {
@@ -689,6 +781,13 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    /** Thumbnails depend on the whole edit: drop them after any colour change. */
+    private void invalidateThumbs() {
+        thumbs.clear();
+        thumbToken++;
+        if ("filters".equals(tool)) ui.postDelayed(this::makeThumbs, 250);
     }
 
     // ---------------------------------------------------------------- stack
@@ -717,6 +816,7 @@ public class MainActivity extends Activity {
             box.addView(r);
             slider(box, "القوة", 0, 100, Math.round(l.strength * 100), Math.round(FilterLibrary.defaultStrength(l.filter) * 100), "٪",
                     (v, done) -> { l.strength = v / 100f; selLayer = idx; if (done) commit(true); else renderSoon(); });
+            if (l.filter.equals("cinematic:film")) layerExtras(box, l);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp.setMargins(0, dp(4), 0, dp(4));
             panel.addView(box, lp);
@@ -899,7 +999,7 @@ public class MainActivity extends Activity {
                 (v, done) -> { state.focusRange = v / 100f; if (done) { flashFocus = true; commit(true); } });
         slider(panel, "حدود الجسم: تقليص ← → توسيع", -100, 100, Math.round(state.objectGrow * 100), 0, "",
                 (v, done) -> { state.objectGrow = v / 100f; if (done) { flashFocus = true; commit(true); } });
-        slider(panel, "قوة التمويه بالعمق", 0, 100, Math.round(state.depthBlur * 100), 50, "٪",
+        slider(panel, "مقدار عزل الخلفية (مستقل عن قوة الفلتر)", 0, 100, Math.round(state.depthBlur * 100), 50, "٪",
                 (v, done) -> { state.depthBlur = v / 100f; if (done) commit(true); });
         panel.addView(section("محاكاة العدسة (تقريب بصري، لا يغيّر عدسة الهاتف)"));
         LinearLayout fl = hrow();
@@ -1191,7 +1291,7 @@ public class MainActivity extends Activity {
     private void commit(boolean colorChanged) {
         if (history.push(state)) autosave();
         refreshChrome();
-        if (colorChanged) requestRender(); else showResult();
+        if (colorChanged) { requestRender(); invalidateThumbs(); } else showResult();
     }
 
     private void undo() {
@@ -1207,6 +1307,7 @@ public class MainActivity extends Activity {
     }
 
     private void afterHistory() {
+        invalidateThumbs();
         autosave();
         refreshChrome();
         buildPanel();
@@ -1217,7 +1318,7 @@ public class MainActivity extends Activity {
 
     private String colorKey(EditState s) {
         Map<String, Object> m = s.toMap();
-        return Json.write(m.get("layers")) + Json.write(m.get("adjust")) + Json.write(m.get("lens"));
+        return Json.write(m.get("layers")) + Json.write(m.get("adjust")) + Json.write(m.get("lens")) + Json.write(m.get("film"));
     }
 
     private void renderSoon() {
@@ -1262,7 +1363,7 @@ public class MainActivity extends Activity {
                         Bitmap base = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888);
                         Bitmap ov = ImageEngine.focusOverlay(base, p.focusMask);
                         if (ov != null) {
-                            photo.setImages(ov, previewOriginal);
+                            ui.post(() -> { viewToken++; photo.setImages(ov, previewOriginal); });
                             ui.postDelayed(this::showResult, 1100);
                         }
                     }
@@ -1274,32 +1375,46 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Shows the colour result with the geometry/frame view that fits the open tool. */
+    /**
+     * Shows the colour result with the geometry/frame view that fits the open tool. The geometry
+     * pass and bitmap creation run off the UI thread so zooming and panning stay smooth.
+     */
     private void showResult() {
         if (colored == null || previewPx == null) return;
-        try {
-            Bitmap shown, orig;
-            if ("lens".equals(tool)) {
-                shown = Bitmap.createBitmap(colored, pw, ph, Bitmap.Config.ARGB_8888);
-                orig = previewOriginal;
-            } else {
-                boolean crop = !"crop".equals(tool);
-                Geometry g = new Geometry(state, pw, ph, crop);
-                if (g.identity()) {
-                    shown = Bitmap.createBitmap(colored, pw, ph, Bitmap.Config.ARGB_8888);
-                    orig = previewOriginal;
+        final int token = ++viewToken;
+        final int[] col = colored, src = previewPx;
+        final int w = pw, h = ph;
+        final String t = tool;
+        final EditState st = state.copy();
+        final Bitmap origBase = previewOriginal;
+        viewWorker.execute(() -> {
+            if (token != viewToken) return;
+            try {
+                Bitmap shown, orig;
+                if ("lens".equals(t)) {
+                    shown = Bitmap.createBitmap(col, w, h, Bitmap.Config.ARGB_8888);
+                    orig = origBase;
                 } else {
-                    shown = Bitmap.createBitmap(g.render(colored), g.outW, g.outH, Bitmap.Config.ARGB_8888);
-                    orig = Bitmap.createBitmap(g.render(previewPx), g.outW, g.outH, Bitmap.Config.ARGB_8888);
+                    Geometry g = new Geometry(st, w, h, !"crop".equals(t));
+                    if (g.identity()) {
+                        shown = Bitmap.createBitmap(col, w, h, Bitmap.Config.ARGB_8888);
+                        orig = origBase;
+                    } else {
+                        shown = Bitmap.createBitmap(g.render(col), g.outW, g.outH, Bitmap.Config.ARGB_8888);
+                        orig = Bitmap.createBitmap(g.render(src), g.outW, g.outH, Bitmap.Config.ARGB_8888);
+                    }
                 }
+                ui.post(() -> {
+                    if (token != viewToken) return;
+                    photo.setImages(shown, orig);
+                    if ("crop".equals(tool)) photo.setCropMode(true, new RectF(state.cropL, state.cropT, state.cropR, state.cropB), aspectValue(state.aspect));
+                    else photo.setCropMode(false, null, 0);
+                    setStatus(statusLine());
+                });
+            } catch (OutOfMemoryError e) {
+                ui.post(() -> setStatus("الذاكرة لا تكفي للعرض"));
             }
-            photo.setImages(shown, orig);
-            if ("crop".equals(tool)) photo.setCropMode(true, new RectF(state.cropL, state.cropT, state.cropR, state.cropB), aspectValue(state.aspect));
-            else photo.setCropMode(false, null, 0);
-            setStatus(statusLine());
-        } catch (OutOfMemoryError e) {
-            setStatus("الذاكرة لا تكفي للعرض");
-        }
+        });
     }
 
     private String statusLine() {
@@ -1808,6 +1923,7 @@ public class MainActivity extends Activity {
         super.onDestroy();
         worker.shutdownNow();
         thumbWorker.shutdownNow();
+        viewWorker.shutdownNow();
         io.shutdown();
     }
 }

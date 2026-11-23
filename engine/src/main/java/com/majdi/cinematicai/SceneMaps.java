@@ -70,7 +70,10 @@ final class SceneMaps {
             float lo = sorted[(int) (n * 0.01f)], hi = sorted[(int) (n * 0.995f)];
             float inv = 1f / Math.max(1e-6f, hi - lo);
             for (int i = 0; i < n; i++) d[i] = Math.max(0f, Math.min(1f, (d[i] - lo) * inv));
-            d = Guided.guidedFilter(lum, d, w, h, Math.max(2, lg / 220), 2e-3f);
+            // two-scale edge snapping with the photo as guide: a wide pass removes the network's
+            // block structure, a narrow low-epsilon pass aligns depth steps with object edges
+            d = Guided.guidedFilter(lum, d, w, h, Math.max(2, lg / 160), 1e-3f);
+            d = Guided.guidedFilter(lum, d, w, h, Math.max(2, lg / 420), 2e-4f);
             for (int i = 0; i < n; i++) d[i] = Math.max(0f, Math.min(1f, d[i]));
         } else {
             d = new float[n];
@@ -103,12 +106,14 @@ final class SceneMaps {
             if (c > 50) {
                 Arrays.sort(vals, 0, c);
                 focus = vals[c / 2];
-            } else focus = percentileCentral(d, w, h, 0.8f);
+            } else focus = percentile(d, 0.8f);
         } else if (faces != null && faces.length > 0) {
             float[] f = faces[0];
             focus = Guided.sample(d, w, h, (f[0] + f[2]) / 2f, (f[1] + f[3]) / 2f);
         } else {
-            focus = percentileCentral(d, w, h, 0.8f);
+            // no subject and no face: a depth statistic only (never the position in the frame);
+            // automatic isolation stays off in this case anyway (see subjectReliable)
+            focus = percentile(d, 0.8f);
         }
 
         // ---- separation and spread
@@ -126,12 +131,16 @@ final class SceneMaps {
         return new SceneMaps(w, h, d, s, has, area, focus, sep, spread, depthRaw != null);
     }
 
-    private static float percentileCentral(float[] d, int w, int h, float q) {
-        int x0 = w / 4, x1 = 3 * w / 4, y0 = h / 4, y1 = 3 * h / 4;
-        float[] v = new float[(x1 - x0) * (y1 - y0)];
-        int c = 0;
-        for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) v[c++] = d[y * w + x];
-        Arrays.sort(v, 0, c);
-        return c > 0 ? v[(int) ((c - 1) * q)] : 0.5f;
+    private static float percentile(float[] d, float q) {
+        float[] v = d.clone();
+        Arrays.sort(v);
+        return v.length > 0 ? v[(int) ((v.length - 1) * q)] : 0.5f;
+    }
+
+    /** The same maps resampled to another working size (used for small filter previews). */
+    SceneMaps resized(int nw, int nh) {
+        if (nw == w && nh == h) return this;
+        return new SceneMaps(nw, nh, Guided.resize(depth, w, h, nw, nh), Guided.resize(subject, w, h, nw, nh),
+                hasSubject, subjectArea, focus, separation, depthSpread, depthValid);
     }
 }
